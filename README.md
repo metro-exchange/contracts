@@ -3,8 +3,7 @@
 Solidity contracts for the Metro Exchange affiliate-commission system:
 
 - **CommissionVault** holds affiliate commissions in USDC, settles per-code entitlements on a timelock, and lets affiliates claim what they have earned.
-- **Erc20Forwarder** holds a single fixed token and sweeps its full balance to a configured recipient (the vault) whenever anyone calls `forward()`, so affiliate fee configs can point permanently at one address.
-- **RateLimitedForwarder** is the same fixed-token sweeper with a token-bucket drip: `forward()` releases only the amount accrued at `dripRate` per `dripPeriod` (capped at `maxReserve`), so a compromised or mis-set recipient can drain at most one bucket per period rather than the whole balance at once.
+- **RateLimitedForwarder** holds a single fixed token and sweeps it to a configured recipient (the vault) whenever anyone calls `forward()`, so affiliate fee configs can point permanently at one address. Each call releases only a token-bucket slice (`dripRate` per `dripPeriod`, capped at `maxReserve`), bounding how fast funds can leave if that recipient is ever wrong or compromised.
 
 This repository is published for external security review. It is a self-contained Foundry project with no dependency on the Metro monorepo.
 
@@ -15,11 +14,10 @@ In scope (`contracts/`):
 | File | Description |
 |---|---|
 | `CommissionVault.sol` | Settlement, entitlements, claims, migration, and admin. |
-| `Erc20Forwarder.sol` | Permissionless fixed-token sweeper with an owner-controlled recipient. |
-| `RateLimitedForwarder.sol` | Fixed-token sweeper that releases funds through a token-bucket drip. |
+| `RateLimitedForwarder.sol` | Permissionless fixed-token sweeper, owner-controlled recipient, token-bucket drip. |
 | `interfaces/ICommissionVault.sol` | External interface + events for the vault. |
-| `interfaces/IErc20Forwarder.sol` | External interface + events for the forwarder. |
-| `interfaces/IRateLimitedForwarder.sol` | Extends `IErc20Forwarder` with the drip-limit surface. |
+| `interfaces/IErc20Forwarder.sol` | Shared base interface (sweep/admin surface + events) that `IRateLimitedForwarder` extends. |
+| `interfaces/IRateLimitedForwarder.sol` | Adds the drip-limit surface on top of `IErc20Forwarder`. |
 
 Test-only helpers (in scope for context, not deployed to production):
 
@@ -48,7 +46,7 @@ forge build
 forge test
 ```
 
-Compiler: solc 0.8.26, optimizer on, 200 runs (see `foundry.toml`). The current suite is 279 tests across five files.
+Compiler: solc 0.8.26, optimizer on, 200 runs (see `foundry.toml`). The current suite is 235 tests across four files.
 
 ## CommissionVault
 
@@ -82,31 +80,20 @@ Compiler: solc 0.8.26, optimizer on, 200 runs (see `foundry.toml`). The current 
 
 `seedClaimed`, `migrateBalance`, and `finalizeMigration` (all owner-only) exist to import state from a prior vault. They are usable only while `migrationFinalized == false`, which is set at deploy from `_isMigrationTarget`. `processIncoming` is blocked until migration is finalized. Seeded codes are net-zero (`cumulative == claimed`) so the reserve stays correct.
 
-## Erc20Forwarder
+## RateLimitedForwarder
 
-Holds one fixed token (set immutably at deploy) and sweeps its whole balance to `recipient` on `forward()`. The recipient is the CommissionVault, so affiliate fee configs point at the forwarder forever and rerouting downstream is a single `setRecipient` call by the owner.
+Holds one fixed token (set immutably at deploy) and sweeps it to `recipient` on `forward()`, but meters each call through a token bucket instead of releasing the full balance. The recipient is the CommissionVault, so affiliate fee configs point at the forwarder forever and rerouting downstream is a single `setRecipient` call by the owner. The drip caps how fast funds can leave if the recipient is ever wrong or compromised, shrinking the reroute race to one bucket per period.
 
 - **Deploys paused.** Going live is an explicit `unpause()` by the owner, which also proves the owner account controls the contract before any funds are routed to it.
-- **`forward()` is permissionless and reverts on a zero balance.** `tryForward()` is the non-reverting variant for bundles and composing contracts: it returns 0 when paused or empty, but still reverts if the token transfer itself fails (for example a blacklisted or globally paused USDC).
-- **Owner is set explicitly at deploy** (a Safe), so the broadcasting key never holds custody. Owner powers: `setRecipient`, `pause`/`unpause`, `rescueToken`, `rescueETH`, and two-step ownership transfer.
+- **Token-bucket drip.** The bucket refills continuously at `dripRate` tokens per `dripPeriod` seconds and is clamped at `maxReserve`. A call forwards `min(bucket, balance)` and debits the bucket by that amount; any balance above what the bucket allows stays in the forwarder until it refills. `forward()` is permissionless and reverts when nothing is currently releasable; `tryForward()` is the non-reverting variant for bundles (returns 0 when paused or empty, still reverts if the token transfer itself fails, for example a blacklisted or globally paused USDC).
+- **`dripRate == 0` is the off switch.** With `dripRate == 0` the bucket is bypassed and `forward()` sweeps the full balance. The constructor and `setDripLimit` enforce `rate == 0 || period > 0`, so a non-zero rate can never pair with a zero period (division by zero).
+- **Accrual tracks wall-clock, paused time excluded.** Accrual is computed from `block.timestamp - lastAccrual`. Pausing refills the bucket up to that moment and then freezes it; `unpause` resets `lastAccrual` so paused time grants no retroactive drip. `availableBalance()` previews the currently forwardable amount and returns 0 while paused.
+- **Owner is set explicitly at deploy** (a Safe), so the broadcasting key never holds custody. Owner powers: `setRecipient`, `setDripLimit`, `pause`/`unpause`, `rescueToken`, `rescueETH`, and two-step ownership transfer. `setDripLimit` re-accrues the bucket under the old rate before switching parameters and re-clamps it to the new `maxReserve`.
 - **Recipient guard.** The constructor and `setRecipient` reject the zero address, the forwarder itself, and the token contract.
 
 ### Known operational failure modes
 
-Because `forward()` is permissionless and reads `recipient`/`paused` at execution time, whatever sits in the forwarder is sweepable by anyone to the current recipient in every block. Rerouting away from a recipient you no longer trust is therefore a race: the mitigation is to keep the forwarder swept and submit the reroute as one Safe bundle (`pause`, `setRecipient`, `unpause`) through a private relay. USDC-specific edge cases (recipient blacklisted, forwarder blacklisted, USDC globally paused) are documented inline in the contract and in the deploy runbook comments.
-
-## RateLimitedForwarder
-
-Same shape as `Erc20Forwarder` — one immutable token, an owner-controlled `recipient`, deploys paused, permissionless `forward()`/`tryForward()` — but the amount released per call is metered by a token bucket instead of being the full balance. This caps how fast funds can leave the forwarder if the recipient is ever wrong or compromised, shrinking the reroute race to one bucket per period.
-
-- **Token-bucket drip.** The bucket refills continuously at `dripRate` tokens per `dripPeriod` seconds and is clamped at `maxReserve`. A call forwards `min(bucket, balance)` and debits the bucket by that amount. Any balance above what the bucket allows simply stays in the forwarder until the bucket refills.
-- **`dripRate == 0` is the off switch.** With `dripRate == 0` the bucket is bypassed and the contract behaves exactly like `Erc20Forwarder`: `forward()` sweeps the full balance. The constructor and `setDripLimit` enforce `rate == 0 || period > 0`, so a non-zero rate can never pair with a zero period (division by zero).
-- **Accrual tracks wall-clock, paused time excluded.** Accrual is computed from `block.timestamp - lastAccrual`. Pausing refills the bucket up to that moment and then freezes it; `unpause` resets `lastAccrual` so paused time grants no retroactive drip. `availableBalance()` previews the currently forwardable amount and returns 0 while paused.
-- **Owner powers.** `setRecipient`, `setDripLimit`, `pause`/`unpause`, `rescueToken`, `rescueETH`, and two-step ownership transfer. `setDripLimit` re-accrues the bucket under the old rate before switching parameters and re-clamps it to the new `maxReserve`. The recipient guard (constructor and `setRecipient` reject the zero address, the forwarder itself, and the token) is identical to the base forwarder.
-
-### Known operational failure modes
-
-The permissionless-sweep race from `Erc20Forwarder` still applies, but the drip bounds its blast radius: an attacker who sees a bad `recipient` can only pull `min(bucket, balance)` before the bucket is empty, and must wait a full `dripPeriod` for it to refill. The same mitigation — pause/reroute/unpause as one private-relay Safe bundle — remains the clean path. Setting `dripRate == 0` restores full-sweep behavior and therefore removes this protection, so it is intended only for a deliberate drain under owner control.
+Because `forward()` is permissionless and reads `recipient`/`paused` at execution time, whatever the bucket currently allows is sweepable by anyone to the current recipient. The drip bounds the blast radius: an attacker who sees a bad `recipient` can only pull `min(bucket, balance)` before the bucket is empty, and must wait a full `dripPeriod` for it to refill. Rerouting away from a recipient you no longer trust is still a race — the mitigation is to keep the forwarder swept and submit the reroute as one Safe bundle (`pause`, `setRecipient`, `unpause`) through a private relay. Setting `dripRate == 0` restores full-sweep behavior and removes this protection, so it is intended only for a deliberate drain under owner control. USDC-specific edge cases (recipient blacklisted, forwarder blacklisted, USDC globally paused) are documented inline in the contract and in the deploy runbook comments.
 
 ## Off-chain operation
 
@@ -126,8 +113,7 @@ All deploy scripts live in `script/`. Run them from the repo root after `source 
 | Script | Deploys |
 |---|---|
 | `Deploy.s.sol` | CommissionVault (production). Reads addresses, limits, and timelocks from env. |
-| `DeployForwarder.s.sol` | Erc20Forwarder. Asserts chain id, and that owner + recipient have code, before broadcasting. |
-| `DeployRateLimitedForwarder.s.sol` | RateLimitedForwarder. Same chain-id/owner/recipient asserts, plus the drip parameters. |
+| `DeployRateLimitedForwarder.s.sol` | RateLimitedForwarder. Asserts chain id, and that owner + recipient have code, before broadcasting, and reads the drip parameters. |
 | `DeployTestbed.s.sol` | FakeUSDC + FakeDistributor + CommissionVault, for live testing on Base. |
 
 See `.env.example` for the full set of parameters.
@@ -136,7 +122,8 @@ See `.env.example` for the full set of parameters.
 # Dry run (no broadcast): drop --broadcast
 FORWARDER_CHAIN_ID=1 FORWARDER_TOKEN=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
 FORWARDER_RECIPIENT=0x<vault> FORWARDER_OWNER=0x<safe> \
-forge script script/DeployForwarder.s.sol --rpc-url ethereum --account <keystore> --broadcast --verify
+FORWARDER_DRIP_RATE=<units> FORWARDER_DRIP_PERIOD=<seconds> FORWARDER_MAX_RESERVE=<units> \
+forge script script/DeployRateLimitedForwarder.s.sol --rpc-url ethereum --account <keystore> --broadcast --verify
 ```
 
 ### Ethereum mainnet deployment
