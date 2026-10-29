@@ -9,7 +9,6 @@ interface IErc20Forwarder {
     event RecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
     event Paused(bool paused);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
-    event EthRescued(address indexed to, uint256 amount);
     event OwnershipTransferProposed(address indexed currentOwner, address indexed proposedOwner);
     event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
 
@@ -40,7 +39,6 @@ interface IErc20Forwarder {
 
     // ── Owner: rescue ──────────────────────────────────────────
     function rescueToken(address asset, address to, uint256 amount) external;
-    function rescueETH(address to, uint256 amount) external;
 
     // ── Ownership (2-step) ─────────────────────────────────────
     function transferOwnership(address newOwner) external;

@@ -3,10 +3,10 @@ pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {IRateLimitedForwarder} from "./interfaces/IRateLimitedForwarder.sol";
 
-contract RateLimitedForwarder is IRateLimitedForwarder, ReentrancyGuard {
+contract RateLimitedForwarder is IRateLimitedForwarder, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     IERC20 public immutable token;
@@ -129,10 +129,10 @@ contract RateLimitedForwarder is IRateLimitedForwarder, ReentrancyGuard {
 
     function setDripLimit(uint256 rate, uint256 period, uint256 maxReserve_) external onlyOwner {
         _checkLimit(rate, period);
-        if (dripRate != 0) {
-            _refill();
-        } else {
+        if (dripRate == 0) {
             bucket = 0;
+        } else if (!paused) {
+            _refill();
         }
         lastAccrual = block.timestamp;
         if (bucket > maxReserve_) bucket = maxReserve_;
@@ -158,13 +158,6 @@ contract RateLimitedForwarder is IRateLimitedForwarder, ReentrancyGuard {
         require(to != address(0), "Zero address");
         IERC20(asset).safeTransfer(to, amount);
         emit TokenRescued(asset, to, amount);
-    }
-
-    function rescueETH(address to, uint256 amount) external onlyOwner nonReentrant {
-        require(to != address(0), "Zero address");
-        (bool ok,) = to.call{value: amount}("");
-        require(ok, "ETH transfer failed");
-        emit EthRescued(to, amount);
     }
 
     function transferOwnership(address newOwner) external onlyOwner {

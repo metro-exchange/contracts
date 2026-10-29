@@ -7,11 +7,8 @@ import {IRateLimitedForwarder} from "../contracts/interfaces/IRateLimitedForward
 import {IErc20Forwarder} from "../contracts/interfaces/IErc20Forwarder.sol";
 import {FakeUSDC as MockUSDC} from "../contracts/FakeUSDC.sol";
 
-contract RevertingRecipient {
-    receive() external payable {
-        revert("no eth");
-    }
-}
+/// @dev A deployed contract that is not an ERC20, so the constructor's balanceOf probe reverts.
+contract NonTokenContract {}
 
 contract RateLimitedForwarderTest is Test {
     RateLimitedForwarder public forwarder;
@@ -69,7 +66,7 @@ contract RateLimitedForwarderTest is Test {
     }
 
     function test_constructor_revertsOnNonTokenContract() public {
-        address notAToken = address(new RevertingRecipient());
+        address notAToken = address(new NonTokenContract());
         vm.expectRevert();
         new RateLimitedForwarder(notAToken, recipient, owner, 0, 0, 0);
     }
@@ -255,44 +252,6 @@ contract RateLimitedForwarderTest is Test {
         forwarder.pause();
         forwarder.rescueToken(address(usdc), owner, 1000e6);
         assertEq(usdc.balanceOf(owner), 1000e6);
-    }
-
-    function test_rescueETH_happyPath() public {
-        vm.deal(address(forwarder), 5 ether);
-        address payable to = payable(makeAddr("ethSink"));
-        vm.expectEmit(true, false, false, true);
-        emit IErc20Forwarder.EthRescued(to, 2 ether);
-        forwarder.rescueETH(to, 2 ether);
-        assertEq(to.balance, 2 ether);
-        assertEq(address(forwarder).balance, 3 ether);
-    }
-
-    function test_rescueETH_revertsOnZeroTo() public {
-        vm.deal(address(forwarder), 1 ether);
-        vm.expectRevert("Zero address");
-        forwarder.rescueETH(address(0), 1 ether);
-    }
-
-    function test_rescueETH_revertsForNonOwner() public {
-        vm.deal(address(forwarder), 1 ether);
-        vm.prank(stranger);
-        vm.expectRevert("Not owner");
-        forwarder.rescueETH(stranger, 1 ether);
-    }
-
-    function test_rescueETH_worksWhilePaused() public {
-        vm.deal(address(forwarder), 1 ether);
-        address payable to = payable(makeAddr("ethSink"));
-        forwarder.pause();
-        forwarder.rescueETH(to, 1 ether);
-        assertEq(to.balance, 1 ether);
-    }
-
-    function test_rescueETH_revertsWhenRecipientRejects() public {
-        vm.deal(address(forwarder), 1 ether);
-        RevertingRecipient sink = new RevertingRecipient();
-        vm.expectRevert("ETH transfer failed");
-        forwarder.rescueETH(address(sink), 1 ether);
     }
 
     function test_transferOwnership_proposesPending() public {
@@ -555,6 +514,52 @@ contract RateLimitedForwarderTest is Test {
         f.setDripLimit(100e6, 3600, 300e6);
         assertEq(f.bucket(), 0);
         assertEq(f.lastAccrual(), block.timestamp);
+    }
+
+    function test_setDripLimit_pausedDoesNotCreditAccruedInterval() public {
+        RateLimitedForwarder f = _limited();
+        usdc.mint(address(f), 1000e6);
+        skip(3600);
+        f.pause();
+        assertEq(f.bucket(), 100e6);
+        skip(100 * 3600);
+        f.setDripLimit(100e6, 3600, 300e6);
+        assertEq(f.bucket(), 100e6);
+        assertEq(f.lastAccrual(), block.timestamp);
+        assertEq(f.dripRate(), 100e6);
+        f.setDripLimit(100e6, 3600, 50e6);
+        assertEq(f.bucket(), 50e6);
+    }
+
+    function test_setDripLimit_pausedThenUnpauseCannotDrainReserve() public {
+        RateLimitedForwarder f = new RateLimitedForwarder(address(usdc), recipient, owner, 100e6, 3600, 300e6);
+        usdc.mint(address(f), 1000e6);
+        skip(100 * 3600);
+        f.setDripLimit(100e6, 3600, 300e6);
+        assertEq(f.bucket(), 0);
+        assertEq(f.lastAccrual(), block.timestamp);
+        f.unpause();
+        assertEq(f.availableBalance(), 0);
+        skip(3600);
+        assertEq(f.availableBalance(), 100e6);
+        f.forward();
+        assertEq(usdc.balanceOf(recipient), 100e6);
+        assertEq(usdc.balanceOf(address(f)), 900e6);
+    }
+
+    function test_setDripLimit_pausedDisableThenReEnableClearsRetainedCredit() public {
+        RateLimitedForwarder f = _limited();
+        usdc.mint(address(f), 1000e6);
+        skip(3600);
+        f.pause();
+        assertEq(f.bucket(), 100e6);
+        f.setDripLimit(0, 0, 300e6);
+        assertEq(f.bucket(), 100e6);
+        skip(100 * 3600);
+        f.setDripLimit(100e6, 3600, 300e6);
+        assertEq(f.bucket(), 0);
+        assertEq(f.lastAccrual(), block.timestamp);
+        assertEq(f.dripRate(), 100e6);
     }
 
     function test_rescueToken_bypassesLimit() public {
