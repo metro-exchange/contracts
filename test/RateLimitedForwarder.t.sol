@@ -7,11 +7,8 @@ import {IRateLimitedForwarder} from "../contracts/interfaces/IRateLimitedForward
 import {IErc20Forwarder} from "../contracts/interfaces/IErc20Forwarder.sol";
 import {FakeUSDC as MockUSDC} from "../contracts/FakeUSDC.sol";
 
-contract RevertingRecipient {
-    receive() external payable {
-        revert("no eth");
-    }
-}
+/// @dev A deployed contract that is not an ERC20, so the constructor's balanceOf probe reverts.
+contract NonTokenContract {}
 
 contract RateLimitedForwarderTest is Test {
     RateLimitedForwarder public forwarder;
@@ -41,7 +38,7 @@ contract RateLimitedForwarderTest is Test {
     function test_constructor_startsPausedUntilOwnerUnpauses() public {
         RateLimitedForwarder fresh = new RateLimitedForwarder(address(usdc), recipient, owner, 0, 0, 0);
         usdc.mint(address(fresh), 1000e6);
-        vm.expectRevert("Paused");
+        vm.expectRevert(RateLimitedForwarder.ContractPaused.selector);
         fresh.forward();
         fresh.unpause();
         fresh.forward();
@@ -49,43 +46,43 @@ contract RateLimitedForwarderTest is Test {
     }
 
     function test_constructor_revertsOnZeroPeriodWithRate() public {
-        vm.expectRevert("Zero period");
+        vm.expectRevert(RateLimitedForwarder.ZeroPeriod.selector);
         new RateLimitedForwarder(address(usdc), recipient, owner, 100e6, 0, 300e6);
     }
 
     function test_constructor_revertsOnZeroToken() public {
-        vm.expectRevert("Zero token");
+        vm.expectRevert(RateLimitedForwarder.ZeroToken.selector);
         new RateLimitedForwarder(address(0), recipient, owner, 0, 0, 0);
     }
 
     function test_constructor_revertsOnTokenWithoutCode() public {
-        vm.expectRevert("Token has no code");
+        vm.expectRevert(RateLimitedForwarder.TokenHasNoCode.selector);
         new RateLimitedForwarder(makeAddr("eoa"), recipient, owner, 0, 0, 0);
     }
 
     function test_constructor_revertsOnPrecompile() public {
-        vm.expectRevert("Token has no code");
+        vm.expectRevert(RateLimitedForwarder.TokenHasNoCode.selector);
         new RateLimitedForwarder(address(0x04), recipient, owner, 0, 0, 0);
     }
 
     function test_constructor_revertsOnNonTokenContract() public {
-        address notAToken = address(new RevertingRecipient());
+        address notAToken = address(new NonTokenContract());
         vm.expectRevert();
         new RateLimitedForwarder(notAToken, recipient, owner, 0, 0, 0);
     }
 
     function test_constructor_revertsOnZeroRecipient() public {
-        vm.expectRevert("Zero recipient");
+        vm.expectRevert(RateLimitedForwarder.ZeroRecipient.selector);
         new RateLimitedForwarder(address(usdc), address(0), owner, 0, 0, 0);
     }
 
     function test_constructor_revertsOnRecipientEqToken() public {
-        vm.expectRevert("Recipient is token");
+        vm.expectRevert(RateLimitedForwarder.RecipientIsToken.selector);
         new RateLimitedForwarder(address(usdc), address(usdc), owner, 0, 0, 0);
     }
 
     function test_constructor_revertsOnZeroOwner() public {
-        vm.expectRevert("Zero owner");
+        vm.expectRevert(RateLimitedForwarder.ZeroOwner.selector);
         new RateLimitedForwarder(address(usdc), recipient, address(0), 0, 0, 0);
     }
 
@@ -134,14 +131,14 @@ contract RateLimitedForwarderTest is Test {
     }
 
     function test_forward_revertsOnZeroBalance() public {
-        vm.expectRevert("Nothing to forward");
+        vm.expectRevert(RateLimitedForwarder.NothingToForward.selector);
         forwarder.forward();
     }
 
     function test_forward_revertsWhenPaused() public {
         usdc.mint(address(forwarder), 1000e6);
         forwarder.pause();
-        vm.expectRevert("Paused");
+        vm.expectRevert(RateLimitedForwarder.ContractPaused.selector);
         forwarder.forward();
     }
 
@@ -178,23 +175,23 @@ contract RateLimitedForwarderTest is Test {
     }
 
     function test_setRecipient_revertsOnZero() public {
-        vm.expectRevert("Zero recipient");
+        vm.expectRevert(RateLimitedForwarder.ZeroRecipient.selector);
         forwarder.setRecipient(address(0));
     }
 
     function test_setRecipient_revertsOnSelf() public {
-        vm.expectRevert("Recipient is self");
+        vm.expectRevert(RateLimitedForwarder.RecipientIsSelf.selector);
         forwarder.setRecipient(address(forwarder));
     }
 
     function test_setRecipient_revertsOnToken() public {
-        vm.expectRevert("Recipient is token");
+        vm.expectRevert(RateLimitedForwarder.RecipientIsToken.selector);
         forwarder.setRecipient(address(usdc));
     }
 
     function test_setRecipient_revertsForNonOwner() public {
         vm.prank(stranger);
-        vm.expectRevert("Not owner");
+        vm.expectRevert(RateLimitedForwarder.NotOwner.selector);
         forwarder.setRecipient(makeAddr("x"));
     }
 
@@ -211,14 +208,14 @@ contract RateLimitedForwarderTest is Test {
 
     function test_pause_revertsForNonOwner() public {
         vm.prank(stranger);
-        vm.expectRevert("Not owner");
+        vm.expectRevert(RateLimitedForwarder.NotOwner.selector);
         forwarder.pause();
     }
 
     function test_unpause_revertsForNonOwner() public {
         forwarder.pause();
         vm.prank(stranger);
-        vm.expectRevert("Not owner");
+        vm.expectRevert(RateLimitedForwarder.NotOwner.selector);
         forwarder.unpause();
     }
 
@@ -240,13 +237,13 @@ contract RateLimitedForwarderTest is Test {
     }
 
     function test_rescueToken_revertsOnZeroTo() public {
-        vm.expectRevert("Zero address");
+        vm.expectRevert(RateLimitedForwarder.ZeroAddress.selector);
         forwarder.rescueToken(address(usdc), address(0), 1);
     }
 
     function test_rescueToken_revertsForNonOwner() public {
         vm.prank(stranger);
-        vm.expectRevert("Not owner");
+        vm.expectRevert(RateLimitedForwarder.NotOwner.selector);
         forwarder.rescueToken(address(usdc), stranger, 1);
     }
 
@@ -255,44 +252,6 @@ contract RateLimitedForwarderTest is Test {
         forwarder.pause();
         forwarder.rescueToken(address(usdc), owner, 1000e6);
         assertEq(usdc.balanceOf(owner), 1000e6);
-    }
-
-    function test_rescueETH_happyPath() public {
-        vm.deal(address(forwarder), 5 ether);
-        address payable to = payable(makeAddr("ethSink"));
-        vm.expectEmit(true, false, false, true);
-        emit IErc20Forwarder.EthRescued(to, 2 ether);
-        forwarder.rescueETH(to, 2 ether);
-        assertEq(to.balance, 2 ether);
-        assertEq(address(forwarder).balance, 3 ether);
-    }
-
-    function test_rescueETH_revertsOnZeroTo() public {
-        vm.deal(address(forwarder), 1 ether);
-        vm.expectRevert("Zero address");
-        forwarder.rescueETH(address(0), 1 ether);
-    }
-
-    function test_rescueETH_revertsForNonOwner() public {
-        vm.deal(address(forwarder), 1 ether);
-        vm.prank(stranger);
-        vm.expectRevert("Not owner");
-        forwarder.rescueETH(stranger, 1 ether);
-    }
-
-    function test_rescueETH_worksWhilePaused() public {
-        vm.deal(address(forwarder), 1 ether);
-        address payable to = payable(makeAddr("ethSink"));
-        forwarder.pause();
-        forwarder.rescueETH(to, 1 ether);
-        assertEq(to.balance, 1 ether);
-    }
-
-    function test_rescueETH_revertsWhenRecipientRejects() public {
-        vm.deal(address(forwarder), 1 ether);
-        RevertingRecipient sink = new RevertingRecipient();
-        vm.expectRevert("ETH transfer failed");
-        forwarder.rescueETH(address(sink), 1 ether);
     }
 
     function test_transferOwnership_proposesPending() public {
@@ -312,18 +271,18 @@ contract RateLimitedForwarderTest is Test {
         forwarder.transferOwnership(address(0));
         assertEq(forwarder.pendingOwner(), address(0));
         vm.prank(typo);
-        vm.expectRevert("Not pending owner");
+        vm.expectRevert(RateLimitedForwarder.NotPendingOwner.selector);
         forwarder.acceptOwnership();
     }
 
     function test_transferOwnership_revertsOnAlreadyOwner() public {
-        vm.expectRevert("Already owner");
+        vm.expectRevert(RateLimitedForwarder.AlreadyOwner.selector);
         forwarder.transferOwnership(owner);
     }
 
     function test_transferOwnership_revertsForNonOwner() public {
         vm.prank(stranger);
-        vm.expectRevert("Not owner");
+        vm.expectRevert(RateLimitedForwarder.NotOwner.selector);
         forwarder.transferOwnership(makeAddr("nextOwner"));
     }
 
@@ -336,14 +295,14 @@ contract RateLimitedForwarderTest is Test {
         forwarder.acceptOwnership();
         assertEq(forwarder.owner(), next);
         assertEq(forwarder.pendingOwner(), address(0));
-        vm.expectRevert("Not owner");
+        vm.expectRevert(RateLimitedForwarder.NotOwner.selector);
         forwarder.pause();
     }
 
     function test_acceptOwnership_revertsForNonPending() public {
         forwarder.transferOwnership(makeAddr("nextOwner"));
         vm.prank(stranger);
-        vm.expectRevert("Not pending owner");
+        vm.expectRevert(RateLimitedForwarder.NotPendingOwner.selector);
         forwarder.acceptOwnership();
     }
 
@@ -410,7 +369,7 @@ contract RateLimitedForwarderTest is Test {
         usdc.mint(address(f), 1000e6);
         skip(3600);
         f.forward();
-        vm.expectRevert("Nothing to forward");
+        vm.expectRevert(RateLimitedForwarder.NothingToForward.selector);
         f.forward();
     }
 
@@ -500,12 +459,12 @@ contract RateLimitedForwarderTest is Test {
 
     function test_setDripLimit_onlyOwner() public {
         vm.prank(stranger);
-        vm.expectRevert("Not owner");
+        vm.expectRevert(RateLimitedForwarder.NotOwner.selector);
         forwarder.setDripLimit(100e6, 3600, 300e6);
     }
 
     function test_setDripLimit_revertsOnZeroPeriodWithRate() public {
-        vm.expectRevert("Zero period");
+        vm.expectRevert(RateLimitedForwarder.ZeroPeriod.selector);
         forwarder.setDripLimit(100e6, 0, 300e6);
     }
 
@@ -555,6 +514,52 @@ contract RateLimitedForwarderTest is Test {
         f.setDripLimit(100e6, 3600, 300e6);
         assertEq(f.bucket(), 0);
         assertEq(f.lastAccrual(), block.timestamp);
+    }
+
+    function test_setDripLimit_pausedDoesNotCreditAccruedInterval() public {
+        RateLimitedForwarder f = _limited();
+        usdc.mint(address(f), 1000e6);
+        skip(3600);
+        f.pause();
+        assertEq(f.bucket(), 100e6);
+        skip(100 * 3600);
+        f.setDripLimit(100e6, 3600, 300e6);
+        assertEq(f.bucket(), 100e6);
+        assertEq(f.lastAccrual(), block.timestamp);
+        assertEq(f.dripRate(), 100e6);
+        f.setDripLimit(100e6, 3600, 50e6);
+        assertEq(f.bucket(), 50e6);
+    }
+
+    function test_setDripLimit_pausedThenUnpauseCannotDrainReserve() public {
+        RateLimitedForwarder f = new RateLimitedForwarder(address(usdc), recipient, owner, 100e6, 3600, 300e6);
+        usdc.mint(address(f), 1000e6);
+        skip(100 * 3600);
+        f.setDripLimit(100e6, 3600, 300e6);
+        assertEq(f.bucket(), 0);
+        assertEq(f.lastAccrual(), block.timestamp);
+        f.unpause();
+        assertEq(f.availableBalance(), 0);
+        skip(3600);
+        assertEq(f.availableBalance(), 100e6);
+        f.forward();
+        assertEq(usdc.balanceOf(recipient), 100e6);
+        assertEq(usdc.balanceOf(address(f)), 900e6);
+    }
+
+    function test_setDripLimit_pausedDisableThenReEnableClearsRetainedCredit() public {
+        RateLimitedForwarder f = _limited();
+        usdc.mint(address(f), 1000e6);
+        skip(3600);
+        f.pause();
+        assertEq(f.bucket(), 100e6);
+        f.setDripLimit(0, 0, 300e6);
+        assertEq(f.bucket(), 100e6);
+        skip(100 * 3600);
+        f.setDripLimit(100e6, 3600, 300e6);
+        assertEq(f.bucket(), 0);
+        assertEq(f.lastAccrual(), block.timestamp);
+        assertEq(f.dripRate(), 100e6);
     }
 
     function test_rescueToken_bypassesLimit() public {

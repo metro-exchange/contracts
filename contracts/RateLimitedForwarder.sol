@@ -3,10 +3,10 @@ pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {IRateLimitedForwarder} from "./interfaces/IRateLimitedForwarder.sol";
 
-contract RateLimitedForwarder is IRateLimitedForwarder, ReentrancyGuard {
+contract RateLimitedForwarder is IRateLimitedForwarder, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     IERC20 public immutable token;
@@ -21,13 +21,27 @@ contract RateLimitedForwarder is IRateLimitedForwarder, ReentrancyGuard {
     uint256 public bucket;
     uint256 public lastAccrual;
 
+    error NotOwner();
+    error ContractPaused();
+    error ZeroOwner();
+    error ZeroToken();
+    error TokenHasNoCode();
+    error ZeroRecipient();
+    error RecipientIsSelf();
+    error RecipientIsToken();
+    error ZeroPeriod();
+    error NothingToForward();
+    error ZeroAddress();
+    error AlreadyOwner();
+    error NotPendingOwner();
+
     modifier onlyOwner() {
-        require(msg.sender == owner, "Not owner");
+        if (msg.sender != owner) revert NotOwner();
         _;
     }
 
     modifier whenNotPaused() {
-        require(!paused, "Paused");
+        if (paused) revert ContractPaused();
         _;
     }
 
@@ -39,9 +53,9 @@ contract RateLimitedForwarder is IRateLimitedForwarder, ReentrancyGuard {
         uint256 _dripPeriod,
         uint256 _maxReserve
     ) {
-        require(_owner != address(0), "Zero owner");
-        require(_token != address(0), "Zero token");
-        require(_token.code.length > 0, "Token has no code");
+        if (_owner == address(0)) revert ZeroOwner();
+        if (_token == address(0)) revert ZeroToken();
+        if (_token.code.length == 0) revert TokenHasNoCode();
         IERC20(_token).balanceOf(address(this));
         _checkLimit(_dripRate, _dripPeriod);
         token = IERC20(_token);
@@ -60,18 +74,18 @@ contract RateLimitedForwarder is IRateLimitedForwarder, ReentrancyGuard {
     }
 
     function _checkRecipient(address candidate) internal view {
-        require(candidate != address(0), "Zero recipient");
-        require(candidate != address(this), "Recipient is self");
-        require(candidate != address(token), "Recipient is token");
+        if (candidate == address(0)) revert ZeroRecipient();
+        if (candidate == address(this)) revert RecipientIsSelf();
+        if (candidate == address(token)) revert RecipientIsToken();
     }
 
     function _checkLimit(uint256 rate, uint256 period) internal pure {
-        require(rate == 0 || period > 0, "Zero period");
+        if (rate != 0 && period == 0) revert ZeroPeriod();
     }
 
     function forward() external whenNotPaused {
         uint256 amount = _reserve();
-        require(amount > 0, "Nothing to forward");
+        if (amount == 0) revert NothingToForward();
         _sweep(amount);
     }
 
@@ -129,10 +143,10 @@ contract RateLimitedForwarder is IRateLimitedForwarder, ReentrancyGuard {
 
     function setDripLimit(uint256 rate, uint256 period, uint256 maxReserve_) external onlyOwner {
         _checkLimit(rate, period);
-        if (dripRate != 0) {
-            _refill();
-        } else {
+        if (dripRate == 0) {
             bucket = 0;
+        } else if (!paused) {
+            _refill();
         }
         lastAccrual = block.timestamp;
         if (bucket > maxReserve_) bucket = maxReserve_;
@@ -155,26 +169,19 @@ contract RateLimitedForwarder is IRateLimitedForwarder, ReentrancyGuard {
     }
 
     function rescueToken(address asset, address to, uint256 amount) external onlyOwner nonReentrant {
-        require(to != address(0), "Zero address");
+        if (to == address(0)) revert ZeroAddress();
         IERC20(asset).safeTransfer(to, amount);
         emit TokenRescued(asset, to, amount);
     }
 
-    function rescueETH(address to, uint256 amount) external onlyOwner nonReentrant {
-        require(to != address(0), "Zero address");
-        (bool ok,) = to.call{value: amount}("");
-        require(ok, "ETH transfer failed");
-        emit EthRescued(to, amount);
-    }
-
     function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != owner, "Already owner");
+        if (newOwner == owner) revert AlreadyOwner();
         pendingOwner = newOwner;
         emit OwnershipTransferProposed(owner, newOwner);
     }
 
     function acceptOwnership() external {
-        require(msg.sender == pendingOwner, "Not pending owner");
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
         emit OwnershipTransferred(owner, pendingOwner);
         owner = pendingOwner;
         pendingOwner = address(0);
