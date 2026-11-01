@@ -3,10 +3,10 @@ pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {ICommissionVault} from "./interfaces/ICommissionVault.sol";
 
-contract CommissionVault is ICommissionVault, ReentrancyGuard {
+contract CommissionVault is ICommissionVault, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
     uint256 public immutable settlementTimelock;
@@ -32,9 +32,10 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
     // Cumulative claimed per code
     mapping(bytes32 => uint256) public claimed;
 
-    // Pending settlement (amount + first-bind address, applied on activate)
+    // Pending settlement state: proposed cumulative amount per code, plus a
+    // per-code in-batch dedup marker.
     mapping(bytes32 => uint256) internal _pendingAmount;
-    mapping(bytes32 => address) internal _pendingBindAddress;
+    mapping(bytes32 => bool) internal _pendingInBatch;
     bytes32[] internal _pendingCodeHashes;
     uint256 public pendingActivationTime;
 
@@ -56,22 +57,22 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
     // ── Modifiers ─────────────────────────────────────────────
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "Not owner");
+        if (!(msg.sender == owner)) revert NotOwner();
         _;
     }
 
     modifier onlyOperator() {
-        require(msg.sender == operator, "Not operator");
+        if (!(msg.sender == operator)) revert NotOperator();
         _;
     }
 
     modifier onlyGuardian() {
-        require(msg.sender == guardian, "Not guardian");
+        if (!(msg.sender == guardian)) revert NotGuardian();
         _;
     }
 
     modifier whenNotPaused() {
-        require(!paused, "Paused");
+        if (!(!paused)) revert Paused();
         _;
     }
 
@@ -88,14 +89,14 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
         uint256 _settlementTimelock,
         uint256 _payoutTimelock
     ) {
-        require(_usdc != address(0), "Zero USDC");
-        require(_distributor != address(0), "Zero distributor");
-        require(_operator != address(0), "Zero operator");
-        require(_guardian != address(0), "Zero guardian");
-        require(_maxCodeDelta > 0, "Zero maxCodeDelta");
-        require(_maxBatchDelta > 0, "Zero maxBatchDelta");
-        require(_settlementTimelock >= 1 minutes, "Timelock too short");
-        require(_payoutTimelock >= 1 minutes, "Payout timelock too short");
+        if (!(_usdc != address(0))) revert ZeroUSDC();
+        if (!(_distributor != address(0))) revert ZeroDistributor();
+        if (!(_operator != address(0))) revert ZeroOperator();
+        if (!(_guardian != address(0))) revert ZeroGuardian();
+        if (!(_maxCodeDelta > 0)) revert ZeroMaxCodeDelta();
+        if (!(_maxBatchDelta > 0)) revert ZeroMaxBatchDelta();
+        if (!(_settlementTimelock >= 1 minutes)) revert TimelockTooShort();
+        if (!(_payoutTimelock >= 1 minutes)) revert PayoutTimelockTooShort();
 
         usdc = IERC20(_usdc);
         distributor = _distributor;
@@ -114,35 +115,33 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
     /// @inheritdoc ICommissionVault
     function proposeSettlement(
         string[] calldata codes,
-        address[] calldata addresses,
         uint256[] calldata cumulativeAmounts
     ) external onlyOperator whenNotPaused {
         uint256 len = codes.length;
-        require(len > 0, "Empty batch");
-        require(len == addresses.length && len == cumulativeAmounts.length, "Length mismatch");
-        require(len <= MAX_BATCH_SIZE, "Batch too large");
-        require(_pendingCodeHashes.length == 0, "Pending settlement exists");
+        if (!(len > 0)) revert EmptyBatch();
+        if (!(len == cumulativeAmounts.length)) revert LengthMismatch();
+        if (!(len <= MAX_BATCH_SIZE)) revert BatchTooLarge();
+        if (!(_pendingCodeHashes.length == 0)) revert PendingSettlementExists();
 
         uint256 batchIncrease = 0;
 
         for (uint256 i = 0; i < len; i++) {
-            require(addresses[i] != address(0), "Zero address");
             bytes32 codeHash = keccak256(bytes(codes[i]));
-            require(_pendingBindAddress[codeHash] == address(0), "Duplicate code in batch");
+            if (!(!_pendingInBatch[codeHash])) revert DuplicateCodeInBatch();
 
             uint256 currentAmount = cumulativeAmount[codeHash];
-            require(cumulativeAmounts[i] >= currentAmount, "Cannot decrease amount");
+            if (!(cumulativeAmounts[i] >= currentAmount)) revert CannotDecreaseAmount();
 
             uint256 increase = cumulativeAmounts[i] - currentAmount;
-            require(increase <= maxCodeDelta, "Exceeds max code delta");
+            if (!(increase <= maxCodeDelta)) revert ExceedsMaxCodeDelta();
             batchIncrease += increase;
 
             _pendingAmount[codeHash] = cumulativeAmounts[i];
-            _pendingBindAddress[codeHash] = addresses[i];
+            _pendingInBatch[codeHash] = true;
             _pendingCodeHashes.push(codeHash);
         }
 
-        require(batchIncrease <= maxBatchDelta, "Exceeds max batch delta");
+        if (!(batchIncrease <= maxBatchDelta)) revert ExceedsMaxBatchDelta();
 
         pendingActivationTime = block.timestamp + settlementTimelock;
 
@@ -151,7 +150,7 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
 
     /// @inheritdoc ICommissionVault
     function processIncoming() external onlyOperator whenNotPaused nonReentrant {
-        require(migrationFinalized, "Migration not finalized");
+        if (!(migrationFinalized)) revert MigrationNotFinalized();
 
         uint256 balance = usdc.balanceOf(address(this));
         uint256 mustRetain = requiredReserve();
@@ -171,26 +170,21 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
     /// @inheritdoc ICommissionVault
     function activateSettlement() external whenNotPaused {
         uint256 len = _pendingCodeHashes.length;
-        require(len > 0, "No pending settlement");
-        require(block.timestamp >= pendingActivationTime, "Timelock not expired");
+        if (!(len > 0)) revert NoPendingSettlement();
+        if (!(block.timestamp >= pendingActivationTime)) revert TimelockNotExpired();
 
         uint256 totalIncrease = 0;
 
         for (uint256 i = 0; i < len; i++) {
             bytes32 codeHash = _pendingCodeHashes[i];
             uint256 newAmount = _pendingAmount[codeHash];
+            uint256 priorAmount = cumulativeAmount[codeHash];
 
-            totalIncrease += newAmount - cumulativeAmount[codeHash];
+            totalIncrease += newAmount - priorAmount;
             cumulativeAmount[codeHash] = newAmount;
 
-            // First bind only: never overwrite an existing (possibly just-changed)
-            // payout address. This is what decouples address from earnings.
-            if (payoutAddress[codeHash] == address(0)) {
-                payoutAddress[codeHash] = _pendingBindAddress[codeHash];
-            }
-
             delete _pendingAmount[codeHash];
-            delete _pendingBindAddress[codeHash];
+            delete _pendingInBatch[codeHash];
 
             emit EntitlementUpdated(codeHash, payoutAddress[codeHash], newAmount);
         }
@@ -207,17 +201,17 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
     function claim(string calldata code) external whenNotPaused nonReentrant {
         bytes32 codeHash = keccak256(bytes(code));
 
-        require(msg.sender == payoutAddress[codeHash], "Wrong sender");
+        if (!(msg.sender == payoutAddress[codeHash])) revert WrongSender();
 
         uint256 cumulative = cumulativeAmount[codeHash];
         uint256 alreadyClaimed = claimed[codeHash];
-        require(cumulative > alreadyClaimed, "Nothing to claim");
+        if (!(cumulative > alreadyClaimed)) revert NothingToClaim();
 
         uint256 claimable = cumulative - alreadyClaimed;
-        require(claimable >= minClaimAmount, "Below minimum claim");
+        if (!(claimable >= minClaimAmount)) revert BelowMinimumClaim();
 
         uint256 balance = usdc.balanceOf(address(this));
-        require(claimable <= balance, "Vault underfunded");
+        if (!(claimable <= balance)) revert VaultUnderfunded();
 
         claimed[codeHash] = cumulative;
         totalClaimed += claimable;
@@ -231,10 +225,6 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
 
     /// @inheritdoc ICommissionVault
     function registerCode(string calldata code) external whenNotPaused {
-        // Self-service on-chain registration: the affiliate binds their code's payout
-        // to their own wallet in one tx. The tx sender IS the payout, so no signature
-        // is needed. First-come-first-served on the codeHash; settlement's first-bind
-        // then skips this code, leaving the self-registered address intact.
         _registerCode(code, msg.sender);
     }
 
@@ -249,7 +239,13 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
 
     function _registerCode(string calldata code, address payout) private {
         bytes32 codeHash = keccak256(bytes(code));
-        require(payoutAddress[codeHash] == address(0), "Already registered");
+        if (!(payoutAddress[codeHash] == address(0))) revert AlreadyRegistered();
+        // Two guards, two windows: _pendingInBatch covers a proposed-but-not-yet-
+        // activated batch (cumulativeAmount is still 0 then), cumulativeAmount the
+        // activated one. Self-service stays blocked for either; owner binds via
+        // ownerRegisterCode.
+        if (!(!_pendingInBatch[codeHash])) revert SettlementPending();
+        if (!(cumulativeAmount[codeHash] == 0)) revert CodeHasValue();
         payoutAddress[codeHash] = payout;
         emit CodeRegistered(codeHash, code, payout);
     }
@@ -264,11 +260,11 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
         // change is blocked while a recovery is pending on the shared slot.
         bytes32 codeHash = keccak256(bytes(code));
         address current = payoutAddress[codeHash];
-        require(current != address(0), "Code not on-chain yet");
-        require(msg.sender == current, "Wrong sender");
-        require(newPayout != address(0), "Zero address");
-        require(newPayout != current, "Same address");
-        require(pendingPayoutChange[codeHash].effectiveAt == 0, "Change pending");
+        if (!(current != address(0))) revert CodeNotOnChain();
+        if (!(msg.sender == current)) revert WrongSender();
+        if (!(newPayout != address(0))) revert ZeroAddress();
+        if (!(newPayout != current)) revert SameAddress();
+        if (!(pendingPayoutChange[codeHash].effectiveAt == 0)) revert ChangePending();
 
         payoutAddress[codeHash] = newPayout;
 
@@ -279,8 +275,8 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
     function activatePayoutChange(string calldata code) external whenNotPaused {
         bytes32 codeHash = keccak256(bytes(code));
         PendingPayoutChange memory change = pendingPayoutChange[codeHash];
-        require(change.effectiveAt != 0, "No pending change");
-        require(block.timestamp >= change.effectiveAt, "Timelock not expired");
+        if (!(change.effectiveAt != 0)) revert NoPendingChange();
+        if (!(block.timestamp >= change.effectiveAt)) revert TimelockNotExpired();
 
         address old = payoutAddress[codeHash];
         payoutAddress[codeHash] = change.newPayout;
@@ -293,7 +289,7 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
     function cancelPayoutChange(string calldata code) external onlyGuardian {
         bytes32 codeHash = keccak256(bytes(code));
         PendingPayoutChange memory change = pendingPayoutChange[codeHash];
-        require(change.effectiveAt != 0, "No pending change");
+        if (!(change.effectiveAt != 0)) revert NoPendingChange();
         delete pendingPayoutChange[codeHash];
 
         emit PayoutChangeCancelled(codeHash, change.newPayout);
@@ -349,12 +345,12 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
     /// @inheritdoc ICommissionVault
     function cancelSettlement() external onlyGuardian {
         uint256 len = _pendingCodeHashes.length;
-        require(len > 0, "No pending settlement");
+        if (!(len > 0)) revert NoPendingSettlement();
 
         for (uint256 i = 0; i < len; i++) {
             bytes32 codeHash = _pendingCodeHashes[i];
             delete _pendingAmount[codeHash];
-            delete _pendingBindAddress[codeHash];
+            delete _pendingInBatch[codeHash];
         }
 
         delete _pendingCodeHashes;
@@ -378,9 +374,9 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
     /// @inheritdoc ICommissionVault
     function ownerSetPayoutAddress(string calldata code, address newPayout) external onlyOwner {
         bytes32 codeHash = keccak256(bytes(code));
-        require(payoutAddress[codeHash] != address(0), "Code not on-chain yet");
-        require(newPayout != address(0), "Zero address");
-        require(pendingPayoutChange[codeHash].effectiveAt == 0, "Change already pending");
+        if (!(payoutAddress[codeHash] != address(0))) revert CodeNotOnChain();
+        if (!(newPayout != address(0))) revert ZeroAddress();
+        if (!(pendingPayoutChange[codeHash].effectiveAt == 0)) revert ChangeAlreadyPending();
 
         // Owner recovery reuses the shared pending slot (guardian veto + public
         // activation for free).
@@ -388,6 +384,16 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
         pendingPayoutChange[codeHash] = PendingPayoutChange({newPayout: newPayout, effectiveAt: effectiveAt});
 
         emit OwnerPayoutChangeProposed(codeHash, newPayout, effectiveAt);
+    }
+
+    function ownerRegisterCode(string calldata code, address payout) external onlyOwner {
+        // Break-glass: no pending-settlement guard, unlike _registerCode — a
+        // settlement never touches the payout, so there is nothing to race.
+        bytes32 codeHash = keccak256(bytes(code));
+        if (!(payoutAddress[codeHash] == address(0))) revert AlreadyRegistered();
+        if (!(payout != address(0))) revert ZeroPayout();
+        payoutAddress[codeHash] = payout;
+        emit CodeRegistered(codeHash, code, payout);
     }
 
     /// @inheritdoc ICommissionVault
@@ -404,8 +410,8 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
         // key-compromise), and force-pushing to the old address would override the
         // timelock's whole purpose. Resolve pending changes, then re-run the sweep.
         uint256 len = codes.length;
-        require(len > 0, "Empty batch");
-        require(len <= MAX_BATCH_SIZE, "Batch too large");
+        if (!(len > 0)) revert EmptyBatch();
+        if (!(len <= MAX_BATCH_SIZE)) revert BatchTooLarge();
 
         uint256 totalPaid = 0;
         uint256 paidCount = 0;
@@ -449,11 +455,11 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
         // hands the operator/guardian is bounded to accelerating a payout the
         // affiliate could take themselves. Unlike ownerDistribute it respects
         // minClaimAmount, so dust keeps accruing instead of burning gas.
-        require(msg.sender == operator || msg.sender == guardian || msg.sender == owner, "Not authorized");
+        if (!(msg.sender == operator || msg.sender == guardian || msg.sender == owner)) revert NotAuthorized();
 
         uint256 len = codes.length;
-        require(len > 0, "Empty batch");
-        require(len <= MAX_BATCH_SIZE, "Batch too large");
+        if (!(len > 0)) revert EmptyBatch();
+        if (!(len <= MAX_BATCH_SIZE)) revert BatchTooLarge();
 
         uint256 totalPaid = 0;
         uint256 paidCount = 0;
@@ -490,74 +496,79 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
 
     /// @inheritdoc ICommissionVault
     function setOperator(address newOperator) external onlyOwner {
-        require(newOperator != address(0), "Zero operator");
+        if (!(newOperator != address(0))) revert ZeroOperator();
         emit OperatorUpdated(operator, newOperator);
         operator = newOperator;
     }
 
     /// @inheritdoc ICommissionVault
     function setGuardian(address newGuardian) external onlyOwner {
-        require(newGuardian != address(0), "Zero guardian");
+        if (!(newGuardian != address(0))) revert ZeroGuardian();
         emit GuardianUpdated(guardian, newGuardian);
         guardian = newGuardian;
     }
 
     /// @inheritdoc ICommissionVault
     function setDistributor(address newDistributor) external onlyOwner {
-        require(newDistributor != address(0), "Zero distributor");
+        if (!(newDistributor != address(0))) revert ZeroDistributor();
         emit DistributorUpdated(distributor, newDistributor);
         distributor = newDistributor;
     }
 
     /// @inheritdoc ICommissionVault
     function setMinClaimAmount(uint256 newMinClaimAmount) external onlyOwner {
-        require(newMinClaimAmount <= MAX_MIN_CLAIM_AMOUNT, "Exceeds max min claim");
+        if (!(newMinClaimAmount <= MAX_MIN_CLAIM_AMOUNT)) revert ExceedsMaxMinClaim();
         emit MinClaimAmountUpdated(minClaimAmount, newMinClaimAmount);
         minClaimAmount = newMinClaimAmount;
     }
 
     /// @inheritdoc ICommissionVault
     function setMaxCodeDelta(uint256 newMaxCodeDelta) external onlyOwner {
-        require(newMaxCodeDelta > 0, "Zero maxCodeDelta");
+        if (!(newMaxCodeDelta > 0)) revert ZeroMaxCodeDelta();
         emit MaxCodeDeltaUpdated(maxCodeDelta, newMaxCodeDelta);
         maxCodeDelta = newMaxCodeDelta;
     }
 
     /// @inheritdoc ICommissionVault
     function setMaxBatchDelta(uint256 newMaxBatchDelta) external onlyOwner {
-        require(newMaxBatchDelta > 0, "Zero maxBatchDelta");
+        if (!(newMaxBatchDelta > 0)) revert ZeroMaxBatchDelta();
         emit MaxBatchDeltaUpdated(maxBatchDelta, newMaxBatchDelta);
         maxBatchDelta = newMaxBatchDelta;
     }
 
     /// @inheritdoc ICommissionVault
-    function seedClaimed(bytes32[] calldata codeHashes, uint256[] calldata amounts) external onlyOwner {
-        require(!migrationFinalized, "Migration finalized");
-        require(codeHashes.length == amounts.length, "Length mismatch");
-        require(codeHashes.length <= MAX_BATCH_SIZE, "Batch too large");
+    function seedClaimed(bytes32[] calldata codeHashes, uint256[] calldata amounts, address[] calldata payouts)
+        external
+        onlyOwner
+    {
+        if (!(!migrationFinalized)) revert MigrationAlreadyFinalized();
+        if (!(codeHashes.length == amounts.length && codeHashes.length == payouts.length)) revert LengthMismatch();
+        if (!(codeHashes.length <= MAX_BATCH_SIZE)) revert BatchTooLarge();
 
         for (uint256 i = 0; i < codeHashes.length; i++) {
-            require(codeHashes[i] != bytes32(0), "Zero code hash");
-            require(amounts[i] > 0, "Zero amount");
+            if (!(codeHashes[i] != bytes32(0))) revert ZeroCodeHash();
+            if (!(amounts[i] > 0)) revert ZeroAmount();
+            if (!(payouts[i] != address(0))) revert ZeroPayout();
             // Key on cumulativeAmount, not claimed: a code that was already settled
             // has claimed == 0 but cumulativeAmount != 0 — seeding it would overwrite
             // its real entitlement and double-count totalOwed.
-            require(cumulativeAmount[codeHashes[i]] == 0 && claimed[codeHashes[i]] == 0, "Already known");
+            if (!(cumulativeAmount[codeHashes[i]] == 0 && claimed[codeHashes[i]] == 0)) revert AlreadyKnown();
 
             // Seed net-zero (cumulative == claimed) and bump both aggregates
             // together, so mustRetain stays correct and later settlements compute
             // their delta from the seeded baseline rather than from zero.
+            payoutAddress[codeHashes[i]] = payouts[i];
             claimed[codeHashes[i]] = amounts[i];
             cumulativeAmount[codeHashes[i]] = amounts[i];
             totalClaimed += amounts[i];
             totalOwed += amounts[i];
-            emit ClaimedSeeded(codeHashes[i], amounts[i]);
+            emit ClaimedSeeded(codeHashes[i], payouts[i], amounts[i]);
         }
     }
 
     /// @inheritdoc ICommissionVault
     function migrateBalance(address oldVault, uint256 amount) external onlyOwner nonReentrant {
-        require(!migrationFinalized, "Migration finalized");
+        if (!(!migrationFinalized)) revert MigrationAlreadyFinalized();
         usdc.safeTransferFrom(oldVault, address(this), amount);
         emit BalanceMigrated(oldVault, amount);
     }
@@ -570,27 +581,21 @@ contract CommissionVault is ICommissionVault, ReentrancyGuard {
 
     /// @inheritdoc ICommissionVault
     function rescueToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
-        if (token == address(usdc)) {
-            uint256 balance = usdc.balanceOf(address(this));
-            uint256 mustRetain = requiredReserve();
-            uint256 rescuable = balance > mustRetain ? balance - mustRetain : 0;
-            require(amount <= rescuable, "Cannot rescue commission USDC");
-        }
         IERC20(token).safeTransfer(to, amount);
         emit TokenRescued(token, to, amount);
     }
 
     /// @inheritdoc ICommissionVault
     function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Zero address");
-        require(newOwner != owner, "Already owner");
+        if (!(newOwner != address(0))) revert ZeroAddress();
+        if (!(newOwner != owner)) revert AlreadyOwner();
         pendingOwner = newOwner;
         emit OwnershipTransferProposed(owner, newOwner);
     }
 
     /// @inheritdoc ICommissionVault
     function acceptOwnership() external {
-        require(msg.sender == pendingOwner, "Not pending owner");
+        if (!(msg.sender == pendingOwner)) revert NotPendingOwner();
         emit OwnershipTransferred(owner, pendingOwner);
         owner = pendingOwner;
         pendingOwner = address(0);

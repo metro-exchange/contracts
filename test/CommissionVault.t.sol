@@ -20,6 +20,8 @@ contract MockUSDC is ERC20 {
 }
 
 contract CommissionVaultTest is Test {
+    using stdStorage for StdStorage;
+
     CommissionVault public vault;
     MockUSDC public usdc;
 
@@ -46,21 +48,28 @@ contract CommissionVaultTest is Test {
 
     // ── Helpers ─────────────────────────────────────────────
 
-    function _proposeAndActivate(string[] memory codes, address[] memory addrs, uint256[] memory amounts) internal {
+    function _proposeAndActivate(string[] memory codes, uint256[] memory amounts) internal {
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
         vm.warp(block.timestamp + vault.settlementTimelock());
         vault.activateSettlement();
     }
 
     function _singleSettlement(string memory code, address addr, uint256 amount) internal {
+        // Settlement no longer binds a payout, so bind the code first (as its owner or
+        // the admin would) and then settle only the amount.
+        if (vault.payoutAddress(keccak256(bytes(code))) == address(0)) {
+            vault.ownerRegisterCode(code, addr);
+        }
         string[] memory codes = new string[](1);
         codes[0] = code;
-        address[] memory addrs = new address[](1);
-        addrs[0] = addr;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = amount;
-        _proposeAndActivate(codes, addrs, amounts);
+        _proposeAndActivate(codes, amounts);
+    }
+
+    function _craftUnboundValueBearingCode(bytes32 codeHash, uint256 amount) internal {
+        stdstore.target(address(vault)).sig("cumulativeAmount(bytes32)").with_key(codeHash).checked_write(amount);
     }
 
     // ── Constructor ─────────────────────────────────────────
@@ -84,40 +93,40 @@ contract CommissionVaultTest is Test {
     }
 
     function test_constructor_revertsOnZeroUsdc() public {
-        vm.expectRevert("Zero USDC");
+        vm.expectRevert(ICommissionVault.ZeroUSDC.selector);
         new CommissionVault(
             address(0), distributor, operator, guardian, MAX_CODE_DELTA, MAX_BATCH_DELTA, false, TIMELOCK, PAYOUT_TIMELOCK
         );
     }
 
     function test_constructor_revertsOnZeroDistributor() public {
-        vm.expectRevert("Zero distributor");
+        vm.expectRevert(ICommissionVault.ZeroDistributor.selector);
         new CommissionVault(
             address(usdc), address(0), operator, guardian, MAX_CODE_DELTA, MAX_BATCH_DELTA, false, TIMELOCK, PAYOUT_TIMELOCK
         );
     }
 
     function test_constructor_revertsOnZeroOperator() public {
-        vm.expectRevert("Zero operator");
+        vm.expectRevert(ICommissionVault.ZeroOperator.selector);
         new CommissionVault(
             address(usdc), distributor, address(0), guardian, MAX_CODE_DELTA, MAX_BATCH_DELTA, false, TIMELOCK, PAYOUT_TIMELOCK
         );
     }
 
     function test_constructor_revertsOnZeroGuardian() public {
-        vm.expectRevert("Zero guardian");
+        vm.expectRevert(ICommissionVault.ZeroGuardian.selector);
         new CommissionVault(
             address(usdc), distributor, operator, address(0), MAX_CODE_DELTA, MAX_BATCH_DELTA, false, TIMELOCK, PAYOUT_TIMELOCK
         );
     }
 
     function test_constructor_revertsOnZeroMaxCodeDelta() public {
-        vm.expectRevert("Zero maxCodeDelta");
+        vm.expectRevert(ICommissionVault.ZeroMaxCodeDelta.selector);
         new CommissionVault(address(usdc), distributor, operator, guardian, 0, MAX_BATCH_DELTA, false, TIMELOCK, PAYOUT_TIMELOCK);
     }
 
     function test_constructor_revertsOnZeroMaxBatchDelta() public {
-        vm.expectRevert("Zero maxBatchDelta");
+        vm.expectRevert(ICommissionVault.ZeroMaxBatchDelta.selector);
         new CommissionVault(address(usdc), distributor, operator, guardian, MAX_CODE_DELTA, 0, false, TIMELOCK, PAYOUT_TIMELOCK);
     }
 
@@ -126,7 +135,7 @@ contract CommissionVaultTest is Test {
     }
 
     function test_constructor_revertsOnTimelockTooShort() public {
-        vm.expectRevert("Timelock too short");
+        vm.expectRevert(ICommissionVault.TimelockTooShort.selector);
         new CommissionVault(address(usdc), distributor, operator, guardian, MAX_CODE_DELTA, MAX_BATCH_DELTA, false, 59, PAYOUT_TIMELOCK);
     }
 
@@ -143,15 +152,12 @@ contract CommissionVaultTest is Test {
         string[] memory codes = new string[](2);
         codes[0] = "CODE_A";
         codes[1] = "CODE_B";
-        address[] memory addrs = new address[](2);
-        addrs[0] = affiliate1;
-        addrs[1] = affiliate2;
         uint256[] memory amounts = new uint256[](2);
         amounts[0] = 100e6;
         amounts[1] = 50e6;
 
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
 
         assertGt(vault.pendingActivationTime(), block.timestamp);
     }
@@ -159,8 +165,6 @@ contract CommissionVaultTest is Test {
     function test_proposeSettlement_emitsEvent() public {
         string[] memory codes = new string[](1);
         codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 100e6;
 
@@ -168,86 +172,63 @@ contract CommissionVaultTest is Test {
         emit ICommissionVault.SettlementProposed(block.timestamp + vault.settlementTimelock(), 1, 100e6);
 
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
     }
 
     function test_proposeSettlement_revertsIfNotOperator() public {
         string[] memory codes = new string[](1);
         codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 100e6;
 
-        vm.expectRevert("Not operator");
-        vault.proposeSettlement(codes, addrs, amounts);
+        vm.expectRevert(ICommissionVault.NotOperator.selector);
+        vault.proposeSettlement(codes, amounts);
     }
 
     function test_proposeSettlement_revertsOnEmptyBatch() public {
         string[] memory codes = new string[](0);
-        address[] memory addrs = new address[](0);
         uint256[] memory amounts = new uint256[](0);
 
         vm.prank(operator);
-        vm.expectRevert("Empty batch");
-        vault.proposeSettlement(codes, addrs, amounts);
+        vm.expectRevert(ICommissionVault.EmptyBatch.selector);
+        vault.proposeSettlement(codes, amounts);
     }
 
     function test_proposeSettlement_revertsOnLengthMismatch() public {
         string[] memory codes = new string[](2);
         codes[0] = "A";
         codes[1] = "B";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
-        uint256[] memory amounts = new uint256[](2);
+        uint256[] memory amounts = new uint256[](1);
         amounts[0] = 100e6;
-        amounts[1] = 50e6;
 
         vm.prank(operator);
-        vm.expectRevert("Length mismatch");
-        vault.proposeSettlement(codes, addrs, amounts);
+        vm.expectRevert(ICommissionVault.LengthMismatch.selector);
+        vault.proposeSettlement(codes, amounts);
     }
 
     function test_proposeSettlement_revertsIfPendingExists() public {
         string[] memory codes = new string[](1);
         codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 100e6;
 
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
 
         vm.prank(operator);
-        vm.expectRevert("Pending settlement exists");
-        vault.proposeSettlement(codes, addrs, amounts);
-    }
-
-    function test_proposeSettlement_revertsOnZeroAddress() public {
-        string[] memory codes = new string[](1);
-        codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = address(0);
-        uint256[] memory amounts = new uint256[](1);
-        amounts[0] = 100e6;
-
-        vm.prank(operator);
-        vm.expectRevert("Zero address");
-        vault.proposeSettlement(codes, addrs, amounts);
+        vm.expectRevert(ICommissionVault.PendingSettlementExists.selector);
+        vault.proposeSettlement(codes, amounts);
     }
 
     function test_proposeSettlement_revertsOnExceedsMaxCodeDelta() public {
         string[] memory codes = new string[](1);
         codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = MAX_CODE_DELTA + 1;
 
         vm.prank(operator);
-        vm.expectRevert("Exceeds max code delta");
-        vault.proposeSettlement(codes, addrs, amounts);
+        vm.expectRevert(ICommissionVault.ExceedsMaxCodeDelta.selector);
+        vault.proposeSettlement(codes, amounts);
     }
 
     function test_proposeSettlement_revertsOnExceedsMaxBatchDelta() public {
@@ -255,17 +236,15 @@ contract CommissionVaultTest is Test {
         // MAX_CODE_DELTA = 1000e6, MAX_BATCH_DELTA = 10000e6, so 11 codes = 11000e6 > 10000e6
         uint256 count = 11;
         string[] memory codes = new string[](count);
-        address[] memory addrs = new address[](count);
         uint256[] memory amounts = new uint256[](count);
         for (uint256 i = 0; i < count; i++) {
             codes[i] = string(abi.encodePacked("CODE_", vm.toString(i)));
-            addrs[i] = address(uint160(100 + i));
             amounts[i] = MAX_CODE_DELTA;
         }
 
         vm.prank(operator);
-        vm.expectRevert("Exceeds max batch delta");
-        vault.proposeSettlement(codes, addrs, amounts);
+        vm.expectRevert(ICommissionVault.ExceedsMaxBatchDelta.selector);
+        vault.proposeSettlement(codes, amounts);
     }
 
     function test_proposeSettlement_cannotDecreaseAmount() public {
@@ -273,14 +252,12 @@ contract CommissionVaultTest is Test {
 
         string[] memory codes = new string[](1);
         codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 50e6; // less than current 100e6
 
         vm.prank(operator);
-        vm.expectRevert("Cannot decrease amount");
-        vault.proposeSettlement(codes, addrs, amounts);
+        vm.expectRevert(ICommissionVault.CannotDecreaseAmount.selector);
+        vault.proposeSettlement(codes, amounts);
     }
 
     function test_proposeSettlement_revertsWhenPaused() public {
@@ -289,30 +266,25 @@ contract CommissionVaultTest is Test {
 
         string[] memory codes = new string[](1);
         codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 100e6;
 
         vm.prank(operator);
-        vm.expectRevert("Paused");
-        vault.proposeSettlement(codes, addrs, amounts);
+        vm.expectRevert(ICommissionVault.Paused.selector);
+        vault.proposeSettlement(codes, amounts);
     }
 
     function test_proposeSettlement_revert_duplicateCode() public {
         string[] memory codes = new string[](2);
         codes[0] = "CODE_A";
         codes[1] = "CODE_A";
-        address[] memory addrs = new address[](2);
-        addrs[0] = affiliate1;
-        addrs[1] = affiliate2;
         uint256[] memory amounts = new uint256[](2);
         amounts[0] = 100e6;
         amounts[1] = 200e6;
 
         vm.prank(operator);
-        vm.expectRevert("Duplicate code in batch");
-        vault.proposeSettlement(codes, addrs, amounts);
+        vm.expectRevert(ICommissionVault.DuplicateCodeInBatch.selector);
+        vault.proposeSettlement(codes, amounts);
     }
 
     // ── activateSettlement ──────────────────────────────────
@@ -321,14 +293,13 @@ contract CommissionVaultTest is Test {
         string[] memory codes = new string[](2);
         codes[0] = "CODE_A";
         codes[1] = "CODE_B";
-        address[] memory addrs = new address[](2);
-        addrs[0] = affiliate1;
-        addrs[1] = affiliate2;
         uint256[] memory amounts = new uint256[](2);
         amounts[0] = 100e6;
         amounts[1] = 50e6;
 
-        _proposeAndActivate(codes, addrs, amounts);
+        vault.ownerRegisterCode("CODE_A", affiliate1);
+        vault.ownerRegisterCode("CODE_B", affiliate2);
+        _proposeAndActivate(codes, amounts);
 
         assertEq(vault.totalOwed(), 150e6);
         assertEq(vault.pendingActivationTime(), 0);
@@ -347,13 +318,11 @@ contract CommissionVaultTest is Test {
     function test_activateSettlement_anyoneCanCall() public {
         string[] memory codes = new string[](1);
         codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 100e6;
 
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
         vm.warp(block.timestamp + vault.settlementTimelock());
 
         // Random address can activate
@@ -366,21 +335,19 @@ contract CommissionVaultTest is Test {
     function test_activateSettlement_revertsBeforeTimelock() public {
         string[] memory codes = new string[](1);
         codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 100e6;
 
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
 
         vm.warp(block.timestamp + vault.settlementTimelock() - 1 hours);
-        vm.expectRevert("Timelock not expired");
+        vm.expectRevert(ICommissionVault.TimelockNotExpired.selector);
         vault.activateSettlement();
     }
 
     function test_activateSettlement_revertsIfNoPending() public {
-        vm.expectRevert("No pending settlement");
+        vm.expectRevert(ICommissionVault.NoPendingSettlement.selector);
         vault.activateSettlement();
     }
 
@@ -397,13 +364,12 @@ contract CommissionVaultTest is Test {
     function test_activateSettlement_emitsEntitlementUpdated() public {
         string[] memory codes = new string[](1);
         codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 100e6;
 
+        vault.ownerRegisterCode("CODE_A", affiliate1);
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
         vm.warp(block.timestamp + vault.settlementTimelock());
 
         bytes32 codeHash = keccak256(bytes("CODE_A"));
@@ -418,13 +384,11 @@ contract CommissionVaultTest is Test {
     function test_cancelSettlement_clearsState() public {
         string[] memory codes = new string[](1);
         codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 100e6;
 
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
 
         vm.prank(guardian);
         vault.cancelSettlement();
@@ -434,27 +398,25 @@ contract CommissionVaultTest is Test {
 
         // Can propose again after cancel
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
     }
 
     function test_cancelSettlement_revertsIfNotGuardian() public {
         string[] memory codes = new string[](1);
         codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 100e6;
 
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
 
-        vm.expectRevert("Not guardian");
+        vm.expectRevert(ICommissionVault.NotGuardian.selector);
         vault.cancelSettlement();
     }
 
     function test_cancelSettlement_revertsIfNoPending() public {
         vm.prank(guardian);
-        vm.expectRevert("No pending settlement");
+        vm.expectRevert(ICommissionVault.NoPendingSettlement.selector);
         vault.cancelSettlement();
     }
 
@@ -497,7 +459,7 @@ contract CommissionVaultTest is Test {
         usdc.mint(address(vault), 200e6);
 
         vm.prank(affiliate2);
-        vm.expectRevert("Wrong sender");
+        vm.expectRevert(ICommissionVault.WrongSender.selector);
         vault.claim("CODE_A");
     }
 
@@ -509,7 +471,7 @@ contract CommissionVaultTest is Test {
         vault.claim("CODE_A");
 
         vm.prank(affiliate1);
-        vm.expectRevert("Nothing to claim");
+        vm.expectRevert(ICommissionVault.NothingToClaim.selector);
         vault.claim("CODE_A");
     }
 
@@ -520,7 +482,7 @@ contract CommissionVaultTest is Test {
         usdc.mint(address(vault), 200e6);
 
         vm.prank(affiliate1);
-        vm.expectRevert("Below minimum claim");
+        vm.expectRevert(ICommissionVault.BelowMinimumClaim.selector);
         vault.claim("CODE_A");
     }
 
@@ -529,7 +491,7 @@ contract CommissionVaultTest is Test {
         // Don't fund the vault
 
         vm.prank(affiliate1);
-        vm.expectRevert("Vault underfunded");
+        vm.expectRevert(ICommissionVault.VaultUnderfunded.selector);
         vault.claim("CODE_A");
     }
 
@@ -553,13 +515,11 @@ contract CommissionVaultTest is Test {
         // Propose CODE_A = 200e6 (pending)
         string[] memory codes = new string[](1);
         codes[0] = "CODE_A";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 200e6;
 
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
 
         // During timelock: claim should use active (100e6), not pending (200e6)
         assertEq(vault.getClaimable("CODE_A"), 100e6);
@@ -577,7 +537,7 @@ contract CommissionVaultTest is Test {
         vault.pause();
 
         vm.prank(affiliate1);
-        vm.expectRevert("Paused");
+        vm.expectRevert(ICommissionVault.Paused.selector);
         vault.claim("CODE_A");
     }
 
@@ -642,12 +602,12 @@ contract CommissionVaultTest is Test {
         usdc.mint(address(v2), 1000e6);
 
         vm.prank(operator);
-        vm.expectRevert("Migration not finalized");
+        vm.expectRevert(ICommissionVault.MigrationNotFinalized.selector);
         v2.processIncoming();
     }
 
     function test_processIncoming_revertsIfNotOperator() public {
-        vm.expectRevert("Not operator");
+        vm.expectRevert(ICommissionVault.NotOperator.selector);
         vault.processIncoming();
     }
 
@@ -660,7 +620,7 @@ contract CommissionVaultTest is Test {
     }
 
     function test_pause_revertsIfNotGuardian() public {
-        vm.expectRevert("Not guardian");
+        vm.expectRevert(ICommissionVault.NotGuardian.selector);
         vault.pause();
     }
 
@@ -675,7 +635,7 @@ contract CommissionVaultTest is Test {
         vm.prank(guardian);
         vault.pause();
         vm.prank(operator);
-        vm.expectRevert("Not owner");
+        vm.expectRevert(ICommissionVault.NotOwner.selector);
         vault.unpause();
     }
 
@@ -688,7 +648,7 @@ contract CommissionVaultTest is Test {
     }
 
     function test_setOperator_revertsZero() public {
-        vm.expectRevert("Zero operator");
+        vm.expectRevert(ICommissionVault.ZeroOperator.selector);
         vault.setOperator(address(0));
     }
 
@@ -710,7 +670,7 @@ contract CommissionVaultTest is Test {
     }
 
     function test_setMinClaimAmount_revertsAboveMax() public {
-        vm.expectRevert("Exceeds max min claim");
+        vm.expectRevert(ICommissionVault.ExceedsMaxMinClaim.selector);
         vault.setMinClaimAmount(101e6);
     }
 
@@ -720,7 +680,7 @@ contract CommissionVaultTest is Test {
     }
 
     function test_setMaxCodeDelta_revertsZero() public {
-        vm.expectRevert("Zero maxCodeDelta");
+        vm.expectRevert(ICommissionVault.ZeroMaxCodeDelta.selector);
         vault.setMaxCodeDelta(0);
     }
 
@@ -730,7 +690,7 @@ contract CommissionVaultTest is Test {
     }
 
     function test_setMaxBatchDelta_revertsZero() public {
-        vm.expectRevert("Zero maxBatchDelta");
+        vm.expectRevert(ICommissionVault.ZeroMaxBatchDelta.selector);
         vault.setMaxBatchDelta(0);
     }
 
@@ -747,11 +707,116 @@ contract CommissionVaultTest is Test {
         uint256[] memory amounts = new uint256[](2);
         amounts[0] = 50e6;
         amounts[1] = 30e6;
+        address[] memory payouts = new address[](2);
+        payouts[0] = affiliate1;
+        payouts[1] = affiliate2;
 
-        v2.seedClaimed(hashes, amounts);
+        v2.seedClaimed(hashes, amounts, payouts);
         assertEq(v2.totalClaimed(), 80e6);
         assertEq(v2.claimed(keccak256(bytes("CODE_A"))), 50e6);
         assertEq(v2.claimed(keccak256(bytes("CODE_B"))), 30e6);
+        assertEq(v2.payoutAddress(keccak256(bytes("CODE_A"))), affiliate1);
+        assertEq(v2.payoutAddress(keccak256(bytes("CODE_B"))), affiliate2);
+        assertEq(v2.cumulativeAmount(keccak256(bytes("CODE_A"))), 50e6);
+        assertEq(v2.requiredReserve(), 0);
+    }
+
+    function test_seedClaimed_bindsPayoutAndEmitsEvent() public {
+        CommissionVault v2 = new CommissionVault(
+            address(usdc), distributor, operator, guardian, MAX_CODE_DELTA, MAX_BATCH_DELTA, true, TIMELOCK, PAYOUT_TIMELOCK
+        );
+
+        bytes32 h = keccak256(bytes("CODE_A"));
+        bytes32[] memory hashes = new bytes32[](1);
+        hashes[0] = h;
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 100e6;
+        address[] memory payouts = new address[](1);
+        payouts[0] = affiliate1;
+
+        vm.expectEmit(true, true, false, true);
+        emit ICommissionVault.ClaimedSeeded(h, affiliate1, 100e6);
+        v2.seedClaimed(hashes, amounts, payouts);
+    }
+
+    function test_seedClaimed_revertsOnZeroPayout() public {
+        CommissionVault v2 = new CommissionVault(
+            address(usdc), distributor, operator, guardian, MAX_CODE_DELTA, MAX_BATCH_DELTA, true, TIMELOCK, PAYOUT_TIMELOCK
+        );
+
+        bytes32[] memory hashes = new bytes32[](1);
+        hashes[0] = keccak256(bytes("CODE_A"));
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 100e6;
+        address[] memory payouts = new address[](1);
+        payouts[0] = address(0);
+
+        vm.expectRevert(ICommissionVault.ZeroPayout.selector);
+        v2.seedClaimed(hashes, amounts, payouts);
+    }
+
+    function test_seedClaimed_revertsOnLengthMismatch() public {
+        CommissionVault v2 = new CommissionVault(
+            address(usdc), distributor, operator, guardian, MAX_CODE_DELTA, MAX_BATCH_DELTA, true, TIMELOCK, PAYOUT_TIMELOCK
+        );
+
+        bytes32[] memory hashes = new bytes32[](2);
+        hashes[0] = keccak256(bytes("CODE_A"));
+        hashes[1] = keccak256(bytes("CODE_B"));
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = 50e6;
+        amounts[1] = 30e6;
+        address[] memory payouts = new address[](1);
+        payouts[0] = affiliate1;
+
+        vm.expectRevert(ICommissionVault.LengthMismatch.selector);
+        v2.seedClaimed(hashes, amounts, payouts);
+    }
+
+    function test_seedClaimed_seededCodeThenRegisterReverts() public {
+        CommissionVault v2 = new CommissionVault(
+            address(usdc), distributor, operator, guardian, MAX_CODE_DELTA, MAX_BATCH_DELTA, true, TIMELOCK, PAYOUT_TIMELOCK
+        );
+
+        bytes32[] memory hashes = new bytes32[](1);
+        hashes[0] = keccak256(bytes("SEEDED"));
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 100e6;
+        address[] memory payouts = new address[](1);
+        payouts[0] = affiliate1;
+        v2.seedClaimed(hashes, amounts, payouts);
+        v2.finalizeMigration();
+
+        vm.prank(affiliate2);
+        vm.expectRevert(ICommissionVault.AlreadyRegistered.selector);
+        v2.registerCode("SEEDED");
+    }
+
+    function test_seedClaimed_seededCodeThenSettlementCredits() public {
+        CommissionVault v2 = new CommissionVault(
+            address(usdc), distributor, operator, guardian, MAX_CODE_DELTA, MAX_BATCH_DELTA, true, TIMELOCK, PAYOUT_TIMELOCK
+        );
+
+        bytes32[] memory hashes = new bytes32[](1);
+        hashes[0] = keccak256(bytes("REF"));
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 100e6;
+        address[] memory payouts = new address[](1);
+        payouts[0] = affiliate1;
+        v2.seedClaimed(hashes, amounts, payouts);
+        v2.finalizeMigration();
+
+        string[] memory codes = new string[](1);
+        codes[0] = "REF";
+        uint256[] memory cumulative = new uint256[](1);
+        cumulative[0] = 150e6;
+        vm.prank(operator);
+        v2.proposeSettlement(codes, cumulative);
+        vm.warp(block.timestamp + TIMELOCK);
+        v2.activateSettlement();
+
+        assertEq(v2.getClaimable("REF"), 50e6);
+        assertEq(v2.payoutAddress(keccak256(bytes("REF"))), affiliate1);
     }
 
     function test_seedClaimed_revertsAfterFinalized() public {
@@ -759,9 +824,11 @@ contract CommissionVaultTest is Test {
         hashes[0] = keccak256(bytes("CODE_A"));
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 50e6;
+        address[] memory payouts = new address[](1);
+        payouts[0] = affiliate1;
 
-        vm.expectRevert("Migration finalized");
-        vault.seedClaimed(hashes, amounts);
+        vm.expectRevert(ICommissionVault.MigrationAlreadyFinalized.selector);
+        vault.seedClaimed(hashes, amounts, payouts);
     }
 
     function test_seedClaimed_revertsOnZeroHash() public {
@@ -773,9 +840,11 @@ contract CommissionVaultTest is Test {
         hashes[0] = bytes32(0);
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 50e6;
+        address[] memory payouts = new address[](1);
+        payouts[0] = affiliate1;
 
-        vm.expectRevert("Zero code hash");
-        v2.seedClaimed(hashes, amounts);
+        vm.expectRevert(ICommissionVault.ZeroCodeHash.selector);
+        v2.seedClaimed(hashes, amounts, payouts);
     }
 
     function test_seedClaimed_revertsOnAlreadySeeded() public {
@@ -787,11 +856,13 @@ contract CommissionVaultTest is Test {
         hashes[0] = keccak256(bytes("CODE_A"));
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 50e6;
+        address[] memory payouts = new address[](1);
+        payouts[0] = affiliate1;
 
-        v2.seedClaimed(hashes, amounts);
+        v2.seedClaimed(hashes, amounts, payouts);
 
-        vm.expectRevert("Already known");
-        v2.seedClaimed(hashes, amounts);
+        vm.expectRevert(ICommissionVault.AlreadyKnown.selector);
+        v2.seedClaimed(hashes, amounts, payouts);
     }
 
     function test_migrateBalance() public {
@@ -810,7 +881,7 @@ contract CommissionVaultTest is Test {
     }
 
     function test_migrateBalance_revertsAfterFinalized() public {
-        vm.expectRevert("Migration finalized");
+        vm.expectRevert(ICommissionVault.MigrationAlreadyFinalized.selector);
         vault.migrateBalance(makeAddr("old"), 100e6);
     }
 
@@ -839,12 +910,12 @@ contract CommissionVaultTest is Test {
     }
 
     function test_transferOwnership_revertsZeroAddress() public {
-        vm.expectRevert("Zero address");
+        vm.expectRevert(ICommissionVault.ZeroAddress.selector);
         vault.transferOwnership(address(0));
     }
 
     function test_transferOwnership_revertsAlreadyOwner() public {
-        vm.expectRevert("Already owner");
+        vm.expectRevert(ICommissionVault.AlreadyOwner.selector);
         vault.transferOwnership(owner);
     }
 
@@ -852,7 +923,7 @@ contract CommissionVaultTest is Test {
         vault.transferOwnership(makeAddr("newOwner"));
 
         vm.prank(makeAddr("random"));
-        vm.expectRevert("Not pending owner");
+        vm.expectRevert(ICommissionVault.NotPendingOwner.selector);
         vault.acceptOwnership();
     }
 
@@ -867,28 +938,30 @@ contract CommissionVaultTest is Test {
         assertEq(other.balanceOf(recipient), 500e6);
     }
 
-    function test_rescueToken_usdcOnlySurplus() public {
+    function test_rescueToken_usdcFullDrainAllowed() public {
         _singleSettlement("CODE_A", affiliate1, 100e6);
         usdc.mint(address(vault), 300e6);
 
-        // Can rescue surplus (300 - 100 = 200)
         address recipient = makeAddr("recipient");
-        vault.rescueToken(address(usdc), recipient, 200e6);
-        assertEq(usdc.balanceOf(recipient), 200e6);
+        vault.rescueToken(address(usdc), recipient, 300e6);
+        assertEq(usdc.balanceOf(recipient), 300e6);
+        assertEq(usdc.balanceOf(address(vault)), 0);
     }
 
-    function test_rescueToken_usdcRevertsOnCommissionFunds() public {
+    function test_processIncoming_stillSizesByReserve() public {
         _singleSettlement("CODE_A", affiliate1, 100e6);
         usdc.mint(address(vault), 300e6);
 
-        address recipient = makeAddr("recipient");
-        vm.expectRevert("Cannot rescue commission USDC");
-        vault.rescueToken(address(usdc), recipient, 250e6);
+        vm.prank(operator);
+        vault.processIncoming();
+
+        assertEq(usdc.balanceOf(address(vault)), 100e6);
+        assertEq(usdc.balanceOf(distributor), 200e6);
     }
 
     function test_rescueToken_revertsIfNotOwner() public {
         vm.prank(operator);
-        vm.expectRevert("Not owner");
+        vm.expectRevert(ICommissionVault.NotOwner.selector);
         vault.rescueToken(address(usdc), makeAddr("x"), 1);
     }
 
@@ -897,7 +970,6 @@ contract CommissionVaultTest is Test {
     function test_proposeSettlement_revertsBatchTooLarge() public {
         uint256 count = 201;
         string[] memory codes = new string[](count);
-        address[] memory addrs = new address[](count);
         uint256[] memory amounts = new uint256[](count);
 
         // Use very small amounts to stay within delta caps
@@ -906,13 +978,12 @@ contract CommissionVaultTest is Test {
 
         for (uint256 i = 0; i < count; i++) {
             codes[i] = string(abi.encodePacked("C", vm.toString(i)));
-            addrs[i] = address(uint160(1000 + i));
             amounts[i] = 1e6;
         }
 
         vm.prank(operator);
-        vm.expectRevert("Batch too large");
-        largeVault.proposeSettlement(codes, addrs, amounts);
+        vm.expectRevert(ICommissionVault.BatchTooLarge.selector);
+        largeVault.proposeSettlement(codes, amounts);
     }
 
     function test_processIncoming_noRevertWhenClaimedExceedsOwed() public {
@@ -934,7 +1005,9 @@ contract CommissionVaultTest is Test {
         hashes[0] = keccak256(bytes("code1"));
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 500e6;
-        migrationVault.seedClaimed(hashes, amounts);
+        address[] memory payouts = new address[](1);
+        payouts[0] = affiliate1;
+        migrationVault.seedClaimed(hashes, amounts, payouts);
         migrationVault.finalizeMigration();
 
         // totalClaimed = 500e6, totalOwed = 0 → mustRetain should be 0, not underflow
@@ -968,7 +1041,9 @@ contract CommissionVaultTest is Test {
         hashes[0] = keccak256(bytes("code1"));
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 500e6;
-        migrationVault.seedClaimed(hashes, amounts);
+        address[] memory payouts = new address[](1);
+        payouts[0] = affiliate1;
+        migrationVault.seedClaimed(hashes, amounts, payouts);
 
         // Now totalClaimed = 500e6, totalOwed = 0
         // rescueToken should not revert — should allow rescuing surplus
@@ -987,7 +1062,10 @@ contract CommissionVaultTest is Test {
         uint256[] memory seeds = new uint256[](2);
         seeds[0] = 100e6;
         seeds[1] = 200e6;
-        v2.seedClaimed(hashes, seeds);
+        address[] memory payouts = new address[](2);
+        payouts[0] = affiliate1;
+        payouts[1] = affiliate2;
+        v2.seedClaimed(hashes, seeds, payouts);
 
         // Vault is funded with exactly what REF will be owed going forward.
         usdc.mint(address(v2), 150e6);
@@ -996,12 +1074,10 @@ contract CommissionVaultTest is Test {
         // REF earns another 150 → cumulative 250 (100 historical + 150 new).
         string[] memory codes = new string[](1);
         codes[0] = "REF";
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate1;
         uint256[] memory cumulative = new uint256[](1);
         cumulative[0] = 250e6;
         vm.prank(operator);
-        v2.proposeSettlement(codes, addrs, cumulative);
+        v2.proposeSettlement(codes, cumulative);
         vm.warp(block.timestamp + TIMELOCK);
         v2.activateSettlement();
 
@@ -1040,7 +1116,7 @@ contract CommissionVaultTest is Test {
         vault.registerCode("mycode");
 
         vm.prank(affiliate2);
-        vm.expectRevert("Already registered");
+        vm.expectRevert(ICommissionVault.AlreadyRegistered.selector);
         vault.registerCode("mycode");
     }
 
@@ -1048,7 +1124,7 @@ contract CommissionVaultTest is Test {
         _singleSettlement("settled", affiliate1, 10e6);
 
         vm.prank(affiliate2);
-        vm.expectRevert("Already registered");
+        vm.expectRevert(ICommissionVault.AlreadyRegistered.selector);
         vault.registerCode("settled");
     }
 
@@ -1057,8 +1133,29 @@ contract CommissionVaultTest is Test {
         vault.pause();
 
         vm.prank(affiliate1);
-        vm.expectRevert("Paused");
+        vm.expectRevert(ICommissionVault.Paused.selector);
         vault.registerCode("mycode");
+    }
+
+    function test_registerCode_revertsWhilePendingSettlement() public {
+        // A settlement is proposed for a code nobody bound yet. Until it activates,
+        // cumulativeAmount is still 0, so the "Code has value" guard alone would let a
+        // front-runner self-register and steal the pending value. The pending guard
+        // blocks that for the whole proposed-but-not-activated window.
+        string[] memory codes = new string[](1);
+        codes[0] = "orphan";
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 10e6;
+        vm.prank(operator);
+        vault.proposeSettlement(codes, amounts);
+
+        vm.prank(affiliate2);
+        vm.expectRevert(ICommissionVault.SettlementPending.selector);
+        vault.registerCode("orphan");
+
+        vm.prank(affiliate2);
+        vm.expectRevert(ICommissionVault.SettlementPending.selector);
+        vault.registerCode("orphan", affiliate2);
     }
 
     function test_registerCode_thenChangePayoutWorksImmediately() public {
@@ -1071,10 +1168,12 @@ contract CommissionVaultTest is Test {
         assertEq(vault.payoutAddress(keccak256(bytes("mycode"))), affiliate2);
     }
 
-    function test_registerCode_settlementDoesNotClobber() public {
+    function test_registerCode_settlementDoesNotRebindSelfRegistration() public {
         vm.prank(affiliate1);
         vault.registerCode("mycode");
 
+        // Settlement passes a different address — it is ignored; the self-registered
+        // payout stands.
         _singleSettlement("mycode", affiliate2, 10e6);
 
         assertEq(vault.payoutAddress(keccak256(bytes("mycode"))), affiliate1);
@@ -1126,7 +1225,7 @@ contract CommissionVaultTest is Test {
         vault.registerCode("mycode", affiliate2);
 
         vm.prank(affiliate3);
-        vm.expectRevert("Already registered");
+        vm.expectRevert(ICommissionVault.AlreadyRegistered.selector);
         vault.registerCode("mycode", affiliate1);
     }
 
@@ -1135,7 +1234,7 @@ contract CommissionVaultTest is Test {
         vault.pause();
 
         vm.prank(affiliate1);
-        vm.expectRevert("Paused");
+        vm.expectRevert(ICommissionVault.Paused.selector);
         vault.registerCode("mycode", affiliate2);
     }
 
@@ -1143,28 +1242,25 @@ contract CommissionVaultTest is Test {
         vm.prank(affiliate1);
         vault.registerCode("mycode", affiliate2);
 
-        _singleSettlement("mycode", affiliate1, 10e6);
+        _singleSettlement("mycode", affiliate2, 10e6);
         usdc.mint(address(vault), 100e6);
 
-        // The registrant (affiliate1) is NOT the payout and cannot claim.
         vm.prank(affiliate1);
-        vm.expectRevert("Wrong sender");
+        vm.expectRevert(ICommissionVault.WrongSender.selector);
         vault.claim("mycode");
 
-        // The bound custom payout (affiliate2) claims successfully.
         vm.prank(affiliate2);
         vault.claim("mycode");
         assertEq(usdc.balanceOf(affiliate2), 10e6);
     }
 
-    function test_registerCode_customPayout_settlementDoesNotClobber() public {
+    function test_registerCode_customPayout_settlementDoesNotRebind() public {
         vm.prank(affiliate1);
         vault.registerCode("mycode", affiliate2);
 
-        // Settlement supplies a different first-bind address; it must NOT overwrite
-        // the custom payout already bound by registration.
         _singleSettlement("mycode", affiliate3, 10e6);
 
+        // The custom payout stands; settlement's address is ignored.
         assertEq(vault.payoutAddress(keccak256(bytes("mycode"))), affiliate2);
     }
 
@@ -1196,13 +1292,207 @@ contract CommissionVaultTest is Test {
 
         // The registrant (affiliate1) is not the payout and cannot move it.
         vm.prank(affiliate1);
-        vm.expectRevert("Wrong sender");
+        vm.expectRevert(ICommissionVault.WrongSender.selector);
         vault.changePayoutAddress("mycode", affiliate3);
 
         // Only the bound custom payout (affiliate2) can.
         vm.prank(affiliate2);
         vault.changePayoutAddress("mycode", affiliate3);
         assertEq(vault.payoutAddress(keccak256(bytes("mycode"))), affiliate3);
+    }
+
+    function test_registerCode_revertsWhenValueBearingUnbound() public {
+        bytes32 codeHash = keccak256(bytes("squatted"));
+        _craftUnboundValueBearingCode(codeHash, 100e6);
+        assertEq(vault.cumulativeAmount(codeHash), 100e6);
+        assertEq(vault.payoutAddress(codeHash), address(0));
+
+        vm.prank(affiliate1);
+        vm.expectRevert(ICommissionVault.CodeHasValue.selector);
+        vault.registerCode("squatted");
+
+        vm.prank(affiliate1);
+        vm.expectRevert(ICommissionVault.CodeHasValue.selector);
+        vault.registerCode("squatted", affiliate2);
+    }
+
+    function test_settlement_cannotRebindRegisteredPayout() public {
+        // Whoever registers a code on-chain owns its payout; a settlement cannot move
+        // it. (Off-chain, a code can only earn once it is registered, so the legit
+        // owner always binds before there is anything to claim.)
+        vm.prank(affiliate1);
+        vault.registerCode("public-code");
+
+        _singleSettlement("public-code", affiliate2, 10e6);
+        usdc.mint(address(vault), 100e6);
+
+        assertEq(vault.payoutAddress(keccak256(bytes("public-code"))), affiliate1);
+
+        vm.prank(affiliate2);
+        vm.expectRevert(ICommissionVault.WrongSender.selector);
+        vault.claim("public-code");
+
+        vm.prank(affiliate1);
+        vault.claim("public-code");
+        assertEq(usdc.balanceOf(affiliate1), 10e6);
+    }
+
+    function test_activateSettlement_laterSettlementPreservesPayoutChange() public {
+        _singleSettlement("mycode", affiliate1, 10e6);
+
+        vm.prank(affiliate1);
+        vault.changePayoutAddress("mycode", affiliate2);
+
+        _singleSettlement("mycode", affiliate3, 20e6);
+
+        assertEq(vault.payoutAddress(keccak256(bytes("mycode"))), affiliate2);
+    }
+
+    function test_activateSettlement_ignoresProposedAddress() public {
+        vm.prank(affiliate1);
+        vault.registerCode("mycode");
+
+        // Operator proposes a settlement — it must not touch the payout on activation.
+        string[] memory codes = new string[](1);
+        codes[0] = "mycode";
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 10e6;
+        vm.prank(operator);
+        vault.proposeSettlement(codes, amounts);
+
+        vm.warp(block.timestamp + vault.settlementTimelock());
+        vault.activateSettlement();
+
+        assertEq(vault.payoutAddress(keccak256(bytes("mycode"))), affiliate1);
+    }
+
+    function test_activateSettlement_preservesRotation() public {
+        vm.prank(affiliate1);
+        vault.registerCode("mycode");
+
+        string[] memory codes = new string[](1);
+        codes[0] = "mycode";
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 10e6;
+        vm.prank(operator);
+        vault.proposeSettlement(codes, amounts);
+
+        // Payout rotated while the settlement is pending — the rotation stands.
+        vm.prank(affiliate1);
+        vault.changePayoutAddress("mycode", affiliate2);
+
+        vm.warp(block.timestamp + vault.settlementTimelock());
+        vault.activateSettlement();
+
+        assertEq(vault.payoutAddress(keccak256(bytes("mycode"))), affiliate2);
+    }
+
+    function test_activateSettlement_preservesOwnerRecovery() public {
+        vm.prank(affiliate1);
+        vault.registerCode("mycode");
+
+        // Owner recovers to affiliate2 (affiliate1's key lost/compromised).
+        vault.ownerSetPayoutAddress("mycode", affiliate2);
+
+        // Operator proposes a settlement after the recovery is queued.
+        string[] memory codes = new string[](1);
+        codes[0] = "mycode";
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 10e6;
+        vm.prank(operator);
+        vault.proposeSettlement(codes, amounts);
+
+        uint256 maxTimelock = vault.payoutTimelock() > vault.settlementTimelock()
+            ? vault.payoutTimelock()
+            : vault.settlementTimelock();
+        vm.warp(block.timestamp + maxTimelock);
+
+        vault.activatePayoutChange("mycode");
+        vault.activateSettlement();
+
+        // Recovery is authoritative: settlement ignores the stale affiliate1.
+        assertEq(vault.payoutAddress(keccak256(bytes("mycode"))), affiliate2);
+    }
+
+    function test_activateSettlement_followsRecoveryThenRotation() public {
+        vm.prank(affiliate1);
+        vault.registerCode("mycode");
+
+        vault.ownerSetPayoutAddress("mycode", affiliate2);
+
+        string[] memory codes = new string[](1);
+        codes[0] = "mycode";
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 10e6;
+        vm.prank(operator);
+        vault.proposeSettlement(codes, amounts);
+
+        vm.warp(block.timestamp + vault.payoutTimelock());
+        vault.activatePayoutChange("mycode");
+
+        // Recovered owner rotates again before the settlement activates.
+        vm.prank(affiliate2);
+        vault.changePayoutAddress("mycode", affiliate3);
+
+        vm.warp(block.timestamp + vault.settlementTimelock());
+        vault.activateSettlement();
+
+        // The live payout stands through recovery and rotation; settlement never rebinds.
+        assertEq(vault.payoutAddress(keccak256(bytes("mycode"))), affiliate3);
+    }
+
+    function test_ownerRegisterCode_bindsUnboundCode() public {
+        bytes32 codeHash = keccak256(bytes("c"));
+        vm.expectEmit(true, true, false, true);
+        emit ICommissionVault.CodeRegistered(codeHash, "c", affiliate1);
+
+        vault.ownerRegisterCode("c", affiliate1);
+        assertEq(vault.payoutAddress(codeHash), affiliate1);
+    }
+
+    function test_ownerRegisterCode_revertsWhenAlreadyBound() public {
+        vm.prank(affiliate1);
+        vault.registerCode("c");
+
+        vm.expectRevert(ICommissionVault.AlreadyRegistered.selector);
+        vault.ownerRegisterCode("c", affiliate2);
+    }
+
+    function test_ownerRegisterCode_revertsOnZeroPayout() public {
+        vm.expectRevert(ICommissionVault.ZeroPayout.selector);
+        vault.ownerRegisterCode("c", address(0));
+    }
+
+    function test_ownerRegisterCode_revertsWhenNotOwner() public {
+        vm.prank(affiliate1);
+        vm.expectRevert(ICommissionVault.NotOwner.selector);
+        vault.ownerRegisterCode("c", affiliate1);
+    }
+
+    function test_ownerRegisterCode_worksWhileSettlementPending() public {
+        // Admin can bind a code even with a settlement in flight — settlement never
+        // touches the payout, so the admin registration stands.
+        string[] memory codes = new string[](1);
+        codes[0] = "c";
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 10e6;
+        vm.prank(operator);
+        vault.proposeSettlement(codes, amounts);
+
+        vault.ownerRegisterCode("c", affiliate1);
+        assertEq(vault.payoutAddress(keccak256(bytes("c"))), affiliate1);
+
+        vm.warp(block.timestamp + vault.settlementTimelock());
+        vault.activateSettlement();
+        assertEq(vault.payoutAddress(keccak256(bytes("c"))), affiliate1);
+    }
+
+    function test_ownerRegisterCode_worksWhenPaused() public {
+        vm.prank(guardian);
+        vault.pause();
+
+        vault.ownerRegisterCode("c", affiliate1);
+        assertEq(vault.payoutAddress(keccak256(bytes("c"))), affiliate1);
     }
 
     // ── requiredReserve ────────────────────────────────────
@@ -1237,7 +1527,9 @@ contract CommissionVaultTest is Test {
         hashes[0] = keccak256(bytes("CODE_A"));
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 500e6;
-        migrationVault.seedClaimed(hashes, amounts);
+        address[] memory payouts = new address[](1);
+        payouts[0] = affiliate1;
+        migrationVault.seedClaimed(hashes, amounts, payouts);
         migrationVault.finalizeMigration();
 
         assertEq(migrationVault.requiredReserve(), 0);

@@ -71,14 +71,16 @@ contract CommissionVaultDistributeEligibleTest is Test {
     // ── Helpers ─────────────────────────────────────────────
 
     function _settle(string memory code, address addr, uint256 amount) internal {
+        // Settlement no longer binds a payout; bind the code first, then settle the amount.
+        if (vault.payoutAddress(keccak256(bytes(code))) == address(0)) {
+            vault.ownerRegisterCode(code, addr);
+        }
         string[] memory codes = new string[](1);
         codes[0] = code;
-        address[] memory addrs = new address[](1);
-        addrs[0] = addr;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = amount;
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
         vm.warp(block.timestamp + vault.settlementTimelock());
         vault.activateSettlement();
     }
@@ -114,13 +116,13 @@ contract CommissionVaultDistributeEligibleTest is Test {
 
     function test_strangerReverts() public {
         vm.prank(affiliate1);
-        vm.expectRevert("Not authorized");
+        vm.expectRevert(ICommissionVault.NotAuthorized.selector);
         vault.distributeEligible(_one(CODE_A));
     }
 
     function test_distributorCannotCall() public {
         vm.prank(distributor);
-        vm.expectRevert("Not authorized");
+        vm.expectRevert(ICommissionVault.NotAuthorized.selector);
         vault.distributeEligible(_one(CODE_A));
     }
 
@@ -252,14 +254,14 @@ contract CommissionVaultDistributeEligibleTest is Test {
         vm.prank(guardian);
         vault.pause();
         vm.prank(operator);
-        vm.expectRevert("Paused");
+        vm.expectRevert(ICommissionVault.Paused.selector);
         vault.distributeEligible(_one(CODE_A));
     }
 
     function test_revertsEmptyBatch() public {
         string[] memory codes = new string[](0);
         vm.prank(operator);
-        vm.expectRevert("Empty batch");
+        vm.expectRevert(ICommissionVault.EmptyBatch.selector);
         vault.distributeEligible(codes);
     }
 
@@ -269,7 +271,7 @@ contract CommissionVaultDistributeEligibleTest is Test {
             codes[i] = CODE_A;
         }
         vm.prank(operator);
-        vm.expectRevert("Batch too large");
+        vm.expectRevert(ICommissionVault.BatchTooLarge.selector);
         vault.distributeEligible(codes);
     }
 
