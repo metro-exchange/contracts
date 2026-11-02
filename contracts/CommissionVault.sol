@@ -362,6 +362,7 @@ contract CommissionVault is ICommissionVault, ReentrancyGuardTransient {
     /// @inheritdoc ICommissionVault
     function pause() external onlyGuardian {
         paused = true;
+        emit PauseChanged(true);
     }
 
     // ── Owner functions ───────────────────────────────────────
@@ -369,6 +370,7 @@ contract CommissionVault is ICommissionVault, ReentrancyGuardTransient {
     /// @inheritdoc ICommissionVault
     function unpause() external onlyOwner {
         paused = false;
+        emit PauseChanged(false);
     }
 
     /// @inheritdoc ICommissionVault
@@ -575,6 +577,7 @@ contract CommissionVault is ICommissionVault, ReentrancyGuardTransient {
 
     /// @inheritdoc ICommissionVault
     function finalizeMigration() external onlyOwner {
+        if (!(!migrationFinalized)) revert MigrationAlreadyFinalized();
         migrationFinalized = true;
         emit MigrationFinalized();
     }
