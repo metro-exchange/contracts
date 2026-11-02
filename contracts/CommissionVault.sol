@@ -37,6 +37,7 @@ contract CommissionVault is ICommissionVault, ReentrancyGuardTransient {
     mapping(bytes32 => uint256) internal _pendingAmount;
     mapping(bytes32 => bool) internal _pendingInBatch;
     bytes32[] internal _pendingCodeHashes;
+    uint256 internal _pendingIncrease;
     uint256 public pendingActivationTime;
 
     // Single pending payout change per code, on its own independent clock.
@@ -143,6 +144,7 @@ contract CommissionVault is ICommissionVault, ReentrancyGuardTransient {
 
         if (!(batchIncrease <= maxBatchDelta)) revert ExceedsMaxBatchDelta();
 
+        _pendingIncrease = batchIncrease;
         pendingActivationTime = block.timestamp + settlementTimelock;
 
         emit SettlementProposed(pendingActivationTime, len, batchIncrease);
@@ -192,6 +194,7 @@ contract CommissionVault is ICommissionVault, ReentrancyGuardTransient {
         totalOwed += totalIncrease;
 
         delete _pendingCodeHashes;
+        _pendingIncrease = 0;
         pendingActivationTime = 0;
 
         emit SettlementActivated(len, totalIncrease);
@@ -325,10 +328,9 @@ contract CommissionVault is ICommissionVault, ReentrancyGuardTransient {
 
     /// @inheritdoc ICommissionVault
     function requiredReserve() public view returns (uint256) {
-        // USDC the vault must retain to cover every outstanding earned-but-unclaimed
-        // commission. The >= guard matters post-migration, where seedClaimed can leave
-        // totalClaimed above totalOwed — an unguarded subtraction would underflow-revert.
-        return totalOwed >= totalClaimed ? totalOwed - totalClaimed : 0;
+        // seedClaimed can set totalClaimed above totalOwed, so clamp to avoid underflow.
+        uint256 owed = totalOwed + _pendingIncrease;
+        return owed >= totalClaimed ? owed - totalClaimed : 0;
     }
 
     /// @inheritdoc ICommissionVault
@@ -354,6 +356,7 @@ contract CommissionVault is ICommissionVault, ReentrancyGuardTransient {
         }
 
         delete _pendingCodeHashes;
+        _pendingIncrease = 0;
         pendingActivationTime = 0;
 
         emit SettlementCancelled();

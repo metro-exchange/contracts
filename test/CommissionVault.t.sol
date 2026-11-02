@@ -68,6 +68,15 @@ contract CommissionVaultTest is Test {
         _proposeAndActivate(codes, amounts);
     }
 
+    function _propose(string memory code, uint256 cumulative) internal {
+        string[] memory codes = new string[](1);
+        codes[0] = code;
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = cumulative;
+        vm.prank(operator);
+        vault.proposeSettlement(codes, amounts);
+    }
+
     function _craftUnboundValueBearingCode(bytes32 codeHash, uint256 amount) internal {
         stdstore.target(address(vault)).sig("cumulativeAmount(bytes32)").with_key(codeHash).checked_write(amount);
     }
@@ -1553,6 +1562,50 @@ contract CommissionVaultTest is Test {
         migrationVault.finalizeMigration();
 
         assertEq(migrationVault.requiredReserve(), 0);
+    }
+
+    function test_requiredReserve_includesPendingSettlement() public {
+        vault.ownerRegisterCode("CODE_A", affiliate1);
+        _propose("CODE_A", 200e6);
+
+        assertEq(vault.requiredReserve(), 200e6);
+    }
+
+    function test_requiredReserve_pendingClearedOnActivate() public {
+        vault.ownerRegisterCode("CODE_A", affiliate1);
+        _propose("CODE_A", 200e6);
+        vm.warp(block.timestamp + vault.settlementTimelock());
+        vault.activateSettlement();
+
+        assertEq(vault.requiredReserve(), 200e6);
+    }
+
+    function test_requiredReserve_pendingClearedOnCancel() public {
+        vault.ownerRegisterCode("CODE_A", affiliate1);
+        _propose("CODE_A", 200e6);
+        vm.prank(guardian);
+        vault.cancelSettlement();
+
+        assertEq(vault.requiredReserve(), 0);
+    }
+
+    function test_processIncoming_retainsPendingSettlement() public {
+        _singleSettlement("CODE_A", affiliate1, 100e6);
+        _propose("CODE_A", 300e6);
+        usdc.mint(address(vault), 500e6);
+
+        vm.prank(operator);
+        vault.processIncoming();
+
+        // Retains 100e6 activated + 200e6 pending increase
+        assertEq(usdc.balanceOf(distributor), 200e6);
+        assertEq(usdc.balanceOf(address(vault)), 300e6);
+
+        vm.warp(block.timestamp + vault.settlementTimelock());
+        vault.activateSettlement();
+        vm.prank(affiliate1);
+        vault.claim("CODE_A");
+        assertEq(usdc.balanceOf(affiliate1), 300e6);
     }
 
     // ── requiredTopUp ──────────────────────────────────────
