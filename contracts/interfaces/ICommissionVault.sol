@@ -35,11 +35,7 @@ interface ICommissionVault {
         returns (address payoutAddress, uint256 cumulativeAmount, uint256 claimedAmount);
 
     // ── Operator ───────────────────────────────────────────────
-    function proposeSettlement(
-        string[] calldata codes,
-        address[] calldata addresses,
-        uint256[] calldata cumulativeAmounts
-    ) external;
+    function proposeSettlement(string[] calldata codes, uint256[] calldata cumulativeAmounts) external;
     function processIncoming() external;
 
     // ── Anyone (after timelock) ────────────────────────────────
@@ -65,6 +61,7 @@ interface ICommissionVault {
     // ── Owner ──────────────────────────────────────────────────
     function unpause() external;
     function ownerSetPayoutAddress(string calldata code, address newPayout) external;
+    function ownerRegisterCode(string calldata code, address payout) external;
     function ownerDistribute(string[] calldata codes) external;
     function setOperator(address newOperator) external;
     function setGuardian(address newGuardian) external;
@@ -72,13 +69,60 @@ interface ICommissionVault {
     function setMinClaimAmount(uint256 newMinClaimAmount) external;
     function setMaxCodeDelta(uint256 newMaxCodeDelta) external;
     function setMaxBatchDelta(uint256 newMaxBatchDelta) external;
-    function seedClaimed(bytes32[] calldata codeHashes, uint256[] calldata amounts) external;
+    function seedClaimed(bytes32[] calldata codeHashes, uint256[] calldata amounts, address[] calldata payouts) external;
     function migrateBalance(address oldVault, uint256 amount) external;
     function finalizeMigration() external;
     function rescueToken(address token, address to, uint256 amount) external;
     function transferOwnership(address newOwner) external;
     function acceptOwnership() external;
     function pendingOwner() external view returns (address);
+
+    // ── Errors ─────────────────────────────────────────────────
+    error BatchTooLarge();
+    error ZeroAddress();
+    error EmptyBatch();
+    error ZeroPayout();
+    error ZeroOperator();
+    error ZeroMaxCodeDelta();
+    error ZeroMaxBatchDelta();
+    error ZeroGuardian();
+    error ZeroDistributor();
+    error WrongSender();
+    error TimelockNotExpired();
+    error NoPendingSettlement();
+    error NoPendingChange();
+    error MigrationAlreadyFinalized();
+    error LengthMismatch();
+    error CodeNotOnChain();
+    error AlreadyRegistered();
+    error ZeroCodeHash();
+    error ZeroAmount();
+    error ZeroUSDC();
+    error VaultUnderfunded();
+    error TimelockTooShort();
+    error SettlementPending();
+    error SameAddress();
+    error PendingSettlementExists();
+    error PayoutTimelockTooShort();
+    error Paused();
+    error NothingToClaim();
+    error NotPendingOwner();
+    error NotOwner();
+    error NotOperator();
+    error NotGuardian();
+    error NotAuthorized();
+    error MigrationNotFinalized();
+    error ExceedsMaxMinClaim();
+    error ExceedsMaxCodeDelta();
+    error ExceedsMaxBatchDelta();
+    error DuplicateCodeInBatch();
+    error CodeHasValue();
+    error ChangePending();
+    error ChangeAlreadyPending();
+    error CannotDecreaseAmount();
+    error BelowMinimumClaim();
+    error AlreadyOwner();
+    error AlreadyKnown();
 
     // ── Events ─────────────────────────────────────────────────
     event SettlementProposed(uint256 activationTime, uint256 codeCount, uint256 totalIncrease);
@@ -95,7 +139,7 @@ interface ICommissionVault {
     event MaxCodeDeltaUpdated(uint256 oldValue, uint256 newValue);
     event MaxBatchDeltaUpdated(uint256 oldValue, uint256 newValue);
     event MigrationFinalized();
-    event ClaimedSeeded(bytes32 indexed codeHash, uint256 amount);
+    event ClaimedSeeded(bytes32 indexed codeHash, address indexed payout, uint256 amount);
     event BalanceMigrated(address indexed oldVault, uint256 amount);
     event OwnershipTransferProposed(address indexed currentOwner, address indexed pendingOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);

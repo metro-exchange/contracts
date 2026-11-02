@@ -46,7 +46,7 @@ forge build
 forge test
 ```
 
-Compiler: solc 0.8.26, optimizer on, 200 runs (see `foundry.toml`). The current suite is 235 tests across four files.
+Compiler: solc 0.8.26, optimizer on, 200 runs (see `foundry.toml`). The current suite is 255 tests across five files.
 
 ## CommissionVault
 
@@ -54,7 +54,7 @@ Compiler: solc 0.8.26, optimizer on, 200 runs (see `foundry.toml`). The current 
 
 | Role | Set at | Powers |
 |---|---|---|
-| **owner** | `msg.sender` at deploy | Admin config, unpause, owner-recovery of payout addresses (timelocked), migration functions, `rescueToken` (surplus only), two-step ownership transfer. Intended to be a multisig. |
+| **owner** | `msg.sender` at deploy | Admin config, unpause, owner-recovery of payout addresses (timelocked), `ownerRegisterCode` break-glass binding, migration functions, `rescueToken` (full balance, emergency withdrawal), two-step ownership transfer. Intended to be a multisig. |
 | **operator** | constructor | `proposeSettlement`, `processIncoming`, `distributeEligible`. A hot key run by the off-chain keeper. |
 | **guardian** | constructor | `pause`, `cancelSettlement`, `cancelPayoutChange`, `distributeEligible`. A fast-reacting safety key. |
 | **affiliate** | on-chain, per code | `claim`, `registerCode`, `changePayoutAddress` for their own code. |
@@ -63,22 +63,23 @@ Compiler: solc 0.8.26, optimizer on, 200 runs (see `foundry.toml`). The current 
 ### Design invariants
 
 - **Entitlement is a running cumulative total, never a delta.** `proposeSettlement` sets `cumulativeAmount[code]` to a new absolute value that must be greater than or equal to the current one. Claims track `claimed[code]` cumulatively, and the claimable amount is `cumulative - claimed`. This makes settlement idempotent and re-org tolerant.
-- **Address and earnings are stored in separate maps and never clobber each other.** Settlement writes only the amount (and the address on first bind). Payout changes write only the address. This decouples who gets paid from how much is owed, so a payout-address change can never move or reset an entitlement.
+- **Address and earnings are stored in separate maps and never clobber each other.** Settlement writes only the amount, never an address. Payout changes write only the address. This decouples who gets paid from how much is owed, so a payout-address change can never move or reset an entitlement.
+- **Binding is register-only; settlement never binds a payout.** A code's payout address is set only by its affiliate (`registerCode`), or, as a break-glass, by the owner (`ownerRegisterCode`). Settlement moves `cumulativeAmount` and nothing else, so it can never bind or redirect a payout. Self-service `registerCode` is refused for any code with a pending settlement (`SettlementPending`) or an already-settled balance (`CodeHasValue`); the two guards close the full proposed-and-activated window, so a public code cannot be squatted out from under its legitimate owner before it is bound. `ownerRegisterCode` is intentionally unguarded against those two conditions because settlement never touches the payout, so the owner can always recover an unbound code.
 - **Two independent timelocks.** `settlementTimelock` gates settlement activation; `payoutTimelock` gates owner-initiated payout-address recovery. They are deliberately separate clocks.
-- **Reserve accounting.** `requiredReserve() = totalOwed - totalClaimed` (floored at 0). `processIncoming` forwards only the surplus above this reserve to the distributor, so the vault always retains enough USDC to cover every outstanding claim. `rescueToken` refuses to remove USDC below the reserve.
+- **Reserve accounting.** `requiredReserve() = totalOwed - totalClaimed` (floored at 0). `processIncoming` forwards only the surplus above this reserve to the distributor, so the vault always retains enough USDC to cover every outstanding claim. `rescueToken` is an owner-only (multisig) emergency withdrawal that can move the full balance of any token, USDC included and below the reserve — the owner is the trust root and this is the escape hatch of last resort.
 - **Self-service payout changes are instant and not timelocked.** A compromised affiliate key can already drain via `claim()`, so delaying a self-service `changePayoutAddress` (sent from the current payout address) buys nothing. The timelocked path (`ownerSetPayoutAddress`) exists only for owner recovery of a lost key, and reuses the same pending slot so the guardian can veto it.
 - **Batch bounds.** `MAX_BATCH_SIZE = 200` caps every batched call. `maxCodeDelta` and `maxBatchDelta` cap per-code and per-batch entitlement increases in a single settlement, limiting the blast radius of a bad settlement before the guardian can `cancelSettlement` within the timelock window.
 
 ### Lifecycle
 
-1. **Settle.** Operator calls `proposeSettlement(codes, addresses, cumulativeAmounts)`. After `settlementTimelock`, anyone calls `activateSettlement()` to apply it. The guardian can `cancelSettlement()` during the window.
+1. **Settle.** Operator calls `proposeSettlement(codes, cumulativeAmounts)`. After `settlementTimelock`, anyone calls `activateSettlement()` to apply it. The guardian can `cancelSettlement()` during the window.
 2. **Fund.** USDC arrives at the vault (via the forwarder, see below). Operator calls `processIncoming()` to forward the surplus above the reserve to the distributor.
 3. **Claim.** An affiliate calls `claim(code)` from their registered payout address, or the operator/guardian/owner calls `distributeEligible(codes)` to push everything already claimable (respecting `minClaimAmount`) to each code's own registered address.
 4. **Payout changes.** Affiliates self-serve via `changePayoutAddress`; owner recovery goes through `ownerSetPayoutAddress` (timelocked, guardian-vetoable, publicly activatable).
 
 ### Migration
 
-`seedClaimed`, `migrateBalance`, and `finalizeMigration` (all owner-only) exist to import state from a prior vault. They are usable only while `migrationFinalized == false`, which is set at deploy from `_isMigrationTarget`. `processIncoming` is blocked until migration is finalized. Seeded codes are net-zero (`cumulative == claimed`) so the reserve stays correct.
+`seedClaimed`, `migrateBalance`, and `finalizeMigration` (all owner-only) exist to import state from a prior vault. They are usable only while `migrationFinalized == false`, which is set at deploy from `_isMigrationTarget`. `processIncoming` is blocked until migration is finalized. Seeded codes are net-zero (`cumulative == claimed`) so the reserve stays correct, and `seedClaimed` restores each migrated code's payout address alongside its claimed baseline.
 
 ## RateLimitedForwarder
 

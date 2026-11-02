@@ -63,14 +63,16 @@ contract CommissionVaultPayoutChangeTest is Test {
     // ── Helpers ─────────────────────────────────────────────
 
     function _settle(string memory code, address addr, uint256 amount) internal {
+        // Settlement no longer binds a payout; bind the code first, then settle the amount.
+        if (vault.payoutAddress(keccak256(bytes(code))) == address(0)) {
+            vault.ownerRegisterCode(code, addr);
+        }
         string[] memory codes = new string[](1);
         codes[0] = code;
-        address[] memory addrs = new address[](1);
-        addrs[0] = addr;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = amount;
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
         vm.warp(block.timestamp + vault.settlementTimelock());
         vault.activateSettlement();
     }
@@ -95,7 +97,7 @@ contract CommissionVaultPayoutChangeTest is Test {
         vault.changePayoutAddress(CODE_A, newPayout);
         // Old address can no longer claim.
         vm.prank(affiliate);
-        vm.expectRevert("Wrong sender");
+        vm.expectRevert(ICommissionVault.WrongSender.selector);
         vault.claim(CODE_A);
         // New address claims the full accrued balance.
         vm.prank(newPayout);
@@ -105,32 +107,32 @@ contract CommissionVaultPayoutChangeTest is Test {
 
     function test_changePayoutAddress_onlyCurrentSender() public {
         vm.prank(otherAffiliate);
-        vm.expectRevert("Wrong sender");
+        vm.expectRevert(ICommissionVault.WrongSender.selector);
         vault.changePayoutAddress(CODE_A, newPayout);
     }
 
     function test_changePayoutAddress_revertsZeroAddress() public {
         vm.prank(affiliate);
-        vm.expectRevert("Zero address");
+        vm.expectRevert(ICommissionVault.ZeroAddress.selector);
         vault.changePayoutAddress(CODE_A, address(0));
     }
 
     function test_changePayoutAddress_revertsSameAddress() public {
         vm.prank(affiliate);
-        vm.expectRevert("Same address");
+        vm.expectRevert(ICommissionVault.SameAddress.selector);
         vault.changePayoutAddress(CODE_A, affiliate);
     }
 
     function test_changePayoutAddress_revertsCodeNotOnChain() public {
         vm.prank(affiliate);
-        vm.expectRevert("Code not on-chain yet");
+        vm.expectRevert(ICommissionVault.CodeNotOnChain.selector);
         vault.changePayoutAddress("NEVER_BOUND", newPayout);
     }
 
     function test_changePayoutAddress_revertsWhileOwnerRecoveryPending() public {
         vault.ownerSetPayoutAddress(CODE_A, otherAffiliate); // owner queues recovery
         vm.prank(affiliate);
-        vm.expectRevert("Change pending");
+        vm.expectRevert(ICommissionVault.ChangePending.selector);
         vault.changePayoutAddress(CODE_A, newPayout);
     }
 
@@ -138,15 +140,15 @@ contract CommissionVaultPayoutChangeTest is Test {
         vm.prank(guardian);
         vault.pause();
         vm.prank(affiliate);
-        vm.expectRevert("Paused");
+        vm.expectRevert(ICommissionVault.Paused.selector);
         vault.changePayoutAddress(CODE_A, newPayout);
     }
 
     function test_changePayoutAddress_settlementAfterChangeKeepsNewAddress() public {
         vm.prank(affiliate);
         vault.changePayoutAddress(CODE_A, newPayout);
-        // A later settlement for the same code must NOT clobber the new address
-        // (first-bind only), only bump the amount.
+        // A later settlement for the same code must NOT clobber the new address —
+        // settlement only bumps the amount, never the payout.
         _settle(CODE_A, otherAffiliate, 150e6); // stale bind addr ignored
         assertEq(vault.payoutAddress(CODE_A_HASH), newPayout);
         (, uint256 cumulative,) = vault.getEntitlement(CODE_A);
@@ -180,12 +182,12 @@ contract CommissionVaultPayoutChangeTest is Test {
     function test_activatePayoutChange_revertsBeforeTimelock() public {
         vault.ownerSetPayoutAddress(CODE_A, newPayout);
         vm.warp(block.timestamp + PAYOUT_TIMELOCK - 1);
-        vm.expectRevert("Timelock not expired");
+        vm.expectRevert(ICommissionVault.TimelockNotExpired.selector);
         vault.activatePayoutChange(CODE_A);
     }
 
     function test_activatePayoutChange_revertsNoPending() public {
-        vm.expectRevert("No pending change");
+        vm.expectRevert(ICommissionVault.NoPendingChange.selector);
         vault.activatePayoutChange(CODE_A);
     }
 
@@ -204,7 +206,7 @@ contract CommissionVaultPayoutChangeTest is Test {
 
     function test_cancelPayoutChange_onlyGuardian() public {
         vault.ownerSetPayoutAddress(CODE_A, newPayout);
-        vm.expectRevert("Not guardian");
+        vm.expectRevert(ICommissionVault.NotGuardian.selector);
         vault.cancelPayoutChange(CODE_A);
     }
 
@@ -226,14 +228,13 @@ contract CommissionVaultPayoutChangeTest is Test {
         (, uint40 changeEff) = vault.pendingPayoutChange(CODE_A_HASH);
 
         // Simultaneously queue a settlement (its own clock, own slot).
+        vault.ownerRegisterCode("CODE_B", otherAffiliate);
         string[] memory codes = new string[](1);
         codes[0] = "CODE_B";
-        address[] memory addrs = new address[](1);
-        addrs[0] = otherAffiliate;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 50e6;
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
 
         // Both pending, independent effective times.
         assertGt(uint256(changeEff), 0);
@@ -253,15 +254,13 @@ contract CommissionVaultPayoutChangeTest is Test {
         vm.warp(block.timestamp + PAYOUT_TIMELOCK);
         vault.activatePayoutChange(CODE_A); // address now newPayout
 
-        // Operator proposes a settlement still carrying the OLD address (affiliate).
+        // Operator proposes a settlement after the change applied.
         string[] memory codes = new string[](1);
         codes[0] = CODE_A;
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate; // stale address
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 200e6;
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
         vm.warp(block.timestamp + SETTLEMENT_TIMELOCK);
         vault.activateSettlement();
 
@@ -274,12 +273,10 @@ contract CommissionVaultPayoutChangeTest is Test {
         // New settlement bumps amount (address stays affiliate).
         string[] memory codes = new string[](1);
         codes[0] = CODE_A;
-        address[] memory addrs = new address[](1);
-        addrs[0] = affiliate;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 150e6;
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
         vm.warp(block.timestamp + SETTLEMENT_TIMELOCK);
         vault.activateSettlement();
         assertEq(vault.cumulativeAmount(CODE_A_HASH), 150e6);
@@ -300,7 +297,7 @@ contract CommissionVaultPayoutChangeTest is Test {
 
         // OLD can't claim.
         vm.prank(affiliate);
-        vm.expectRevert("Wrong sender");
+        vm.expectRevert(ICommissionVault.WrongSender.selector);
         vault.claim(CODE_A);
 
         // NEW claims the whole 100e6 (all pre-change earnings).
@@ -314,7 +311,7 @@ contract CommissionVaultPayoutChangeTest is Test {
         vault.ownerSetPayoutAddress(CODE_A, newPayout);
         // NEW cannot claim yet.
         vm.prank(newPayout);
-        vm.expectRevert("Wrong sender");
+        vm.expectRevert(ICommissionVault.WrongSender.selector);
         vault.claim(CODE_A);
         // OLD still can.
         vm.prank(affiliate);
@@ -337,13 +334,13 @@ contract CommissionVaultPayoutChangeTest is Test {
 
     function test_ownerSetPayoutAddress_onlyOwner() public {
         vm.prank(operator);
-        vm.expectRevert("Not owner");
+        vm.expectRevert(ICommissionVault.NotOwner.selector);
         vault.ownerSetPayoutAddress(CODE_A, newPayout);
     }
 
     function test_ownerSetPayoutAddress_revertsChangeAlreadyPending() public {
         vault.ownerSetPayoutAddress(CODE_A, newPayout);
-        vm.expectRevert("Change already pending");
+        vm.expectRevert(ICommissionVault.ChangeAlreadyPending.selector);
         vault.ownerSetPayoutAddress(CODE_A, otherAffiliate);
     }
 
@@ -427,7 +424,7 @@ contract CommissionVaultPayoutChangeTest is Test {
         vault.pause();
         string[] memory codes = new string[](1);
         codes[0] = CODE_A;
-        vm.expectRevert("Paused");
+        vm.expectRevert(ICommissionVault.Paused.selector);
         vault.ownerDistribute(codes);
     }
 
@@ -445,7 +442,7 @@ contract CommissionVaultPayoutChangeTest is Test {
         string[] memory codes = new string[](1);
         codes[0] = CODE_A;
         vm.prank(operator);
-        vm.expectRevert("Not owner");
+        vm.expectRevert(ICommissionVault.NotOwner.selector);
         vault.ownerDistribute(codes);
     }
 
@@ -458,7 +455,7 @@ contract CommissionVaultPayoutChangeTest is Test {
 
     function test_ownerDistribute_revertsEmptyBatch() public {
         string[] memory codes = new string[](0);
-        vm.expectRevert("Empty batch");
+        vm.expectRevert(ICommissionVault.EmptyBatch.selector);
         vault.ownerDistribute(codes);
     }
 
@@ -481,24 +478,22 @@ contract CommissionVaultPayoutChangeTest is Test {
     // ── A4: constructor + first-bind + reserve invariant fuzz ─
 
     function test_constructor_revertsShortPayoutTimelock() public {
-        vm.expectRevert("Payout timelock too short");
+        vm.expectRevert(ICommissionVault.PayoutTimelockTooShort.selector);
         new CommissionVault(
             address(usdc), distributor, operator, guardian, MAX_CODE_DELTA, MAX_BATCH_DELTA, false, SETTLEMENT_TIMELOCK, 59
         );
     }
 
     function test_firstBind_setsAddressThenSecondSettlementDoesNotTouchIt() public {
-        // CODE_A already first-bound to `affiliate` in setUp.
+        // CODE_A already bound to `affiliate` in setUp.
         assertEq(vault.payoutAddress(CODE_A_HASH), affiliate);
-        // A second settlement passing a different address must NOT rebind.
+        // A settlement must NOT rebind the already-bound address.
         string[] memory codes = new string[](1);
         codes[0] = CODE_A;
-        address[] memory addrs = new address[](1);
-        addrs[0] = otherAffiliate;
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = 300e6;
         vm.prank(operator);
-        vault.proposeSettlement(codes, addrs, amounts);
+        vault.proposeSettlement(codes, amounts);
         vm.warp(block.timestamp + SETTLEMENT_TIMELOCK);
         vault.activateSettlement();
         assertEq(vault.payoutAddress(CODE_A_HASH), affiliate, "already-bound address is immutable via settlement");
