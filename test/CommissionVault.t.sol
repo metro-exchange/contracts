@@ -639,6 +639,21 @@ contract CommissionVaultTest is Test {
         vault.unpause();
     }
 
+    function test_pause_emitsPauseChanged() public {
+        vm.expectEmit(false, false, false, true);
+        emit ICommissionVault.PauseChanged(true);
+        vm.prank(guardian);
+        vault.pause();
+    }
+
+    function test_unpause_emitsPauseChanged() public {
+        vm.prank(guardian);
+        vault.pause();
+        vm.expectEmit(false, false, false, true);
+        emit ICommissionVault.PauseChanged(false);
+        vault.unpause();
+    }
+
     // ── Admin setters ──────────────────────────────────────
 
     function test_setOperator() public {
@@ -893,6 +908,11 @@ contract CommissionVaultTest is Test {
 
         v2.finalizeMigration();
         assertTrue(v2.migrationFinalized());
+    }
+
+    function test_finalizeMigration_revertsIfAlreadyFinalized() public {
+        vm.expectRevert(ICommissionVault.MigrationAlreadyFinalized.selector);
+        vault.finalizeMigration();
     }
 
     // ── Ownership transfer ─────────────────────────────────

@@ -139,6 +139,7 @@ interface ICommissionVault {
     event MaxCodeDeltaUpdated(uint256 oldValue, uint256 newValue);
     event MaxBatchDeltaUpdated(uint256 oldValue, uint256 newValue);
     event MigrationFinalized();
+    event PauseChanged(bool paused);
     event ClaimedSeeded(bytes32 indexed codeHash, address indexed payout, uint256 amount);
     event BalanceMigrated(address indexed oldVault, uint256 amount);
     event OwnershipTransferProposed(address indexed currentOwner, address indexed pendingOwner);
